@@ -2,8 +2,6 @@
 
 BookExport is a browser extension that downloads WeRead books as EPUB files. It uses your existing WeRead session and packages chapters, a table of contents, and available illustrations locally.
 
-[Download the latest release](https://github.com/LINYICo/BookExport/releases/latest) · [Release history](RELEASE.md)
-
 ## Install
 
 1. Download the BookExport ZIP from GitHub Releases and extract it.
@@ -34,4 +32,4 @@ The Chrome smoke test uses a clean profile and a local WeRead fixture. Set `CHRO
 
 ## License
 
-BookExport is derived from [WeRead Plus](https://github.com/EwenYoung/weread-plus) and distributed under the [MIT license](LICENSE).
+[MIT](LICENSE)

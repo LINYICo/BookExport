@@ -17,8 +17,6 @@
 - Run EPUB unit tests and a Chrome download smoke test in GitHub Actions.
 - Publish an installable extension ZIP with the upstream MIT license.
 
-**Full changelog** · [v0.1.0…v0.2.0](https://github.com/LINYICo/BookExport/compare/v0.1.0...v0.2.0)
-
 ## v0.1.0 - 2026-11-27
 
 - Released BookExport as a WeRead EPUB download extension with no third-party npm dependencies.
