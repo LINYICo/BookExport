@@ -560,5 +560,5 @@ test('createEbookExport reports non-JSON chapterInfos responses', async () => {
 test('sanitizeFilename removes invalid filename characters', () => {
     assert.equal(sanitizeFilename('a/b:c*d?"<>|'), 'abcd');
     assert.equal(sanitizeFilename('  Continuous Delivery 2.0 '), 'Continuous Delivery 2.0');
-    assert.equal(sanitizeFilename('???'), 'weread-export');
+    assert.equal(sanitizeFilename('???'), 'bookexport');
 });

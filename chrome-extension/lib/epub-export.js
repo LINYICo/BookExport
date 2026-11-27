@@ -324,15 +324,7 @@ export function imageExtensionAndType(data) {
     return null;
 }
 
-function decodeTarString(header, at, length) {
-    let end = at;
-    const limit = at + length;
-    while (end < limit && header[end] !== 0) end++;
-    return new TextDecoder('utf-8').decode(header.subarray(at, end));
-}
-
 // Collect unique image URLs in document order. The full CDN URL identifies each image.
-// Archive member names and document positions can vary.
 export function collectImageSources(source) {
     const out = [];
     const seen = new Set();
@@ -638,7 +630,7 @@ export async function buildEpub({ title, author, chapters, css, now }) {
 }
 
 export function sanitizeFilename(name) {
-    return String(name).replace(/[\\/:*?"<>|]/g, '').trim() || 'weread-export';
+    return String(name).replace(/[\\/:*?"<>|]/g, '').trim() || 'bookexport';
 }
 
 // Browser integration
@@ -666,7 +658,7 @@ export function createEbookExport({
     emptyRetryDelaysMs = [3000, 8000],
     fetchAsset = () => Promise.reject(new Error('No image downloader is available'))
 }) {
-    const state = { phase: 'idle', done: 0, total: 0, message: '' };
+    const state = { phase: 'idle', done: 0, total: 0, message: '', stage: '' };
     let cancelRequested = false;
     let activeToken = null;
 
@@ -688,15 +680,15 @@ export function createEbookExport({
             return {
                 running: true,
                 disabled: cancelRequested,
-                label: cancelRequested ? 'Cancelling…' : 'Cancel ' + state.done + '/' + state.total,
-                title: 'Export in progress. Click to cancel.',
-                message: ''
+                done: state.done,
+                total: state.total,
+                chapterProgress: state.stage === 'chapters',
+                message: cancelRequested ? 'Cancelling download…' : state.message
             };
         }
         return {
             running: false,
             disabled: !hasBookContext(),
-            label: 'Export book',
             message: state.message,
             title: state.message || 'Save a personal copy of this book as an EPUB'
         };
@@ -884,7 +876,8 @@ export function createEbookExport({
         state.phase = 'running';
         state.done = 0;
         state.total = 0;
-        state.message = '';
+        state.message = 'Preparing download…';
+        state.stage = 'preparing';
         cancelRequested = false;
         let failedChapter = null;
         notify();
@@ -902,6 +895,8 @@ export function createEbookExport({
             const chapters = selectExportableChapters(normalizeCatalog(catalog, book.bookId));
             if (!chapters.length) throw new Error('No chapters are available to export.');
             state.total = chapters.length;
+            state.stage = 'chapters';
+            state.message = 'Downloading chapters (0 of ' + state.total + ')';
             notify();
 
             let css = '';
@@ -927,12 +922,16 @@ export function createEbookExport({
                 });
                 if (!css) css = await fetchBookCss(book, chapter);
                 state.done = i + 1;
+                state.message = 'Downloading chapters (' + state.done + ' of ' + state.total + ')';
                 notify();
                 if (i < chapters.length - 1) {
                     await sleep(chapterDelayMs());
                 }
             }
 
+            state.stage = 'images';
+            state.message = 'Finishing image downloads…';
+            notify();
             // Wait for image downloads before rewriting URLs to EPUB paths.
             for (const pending of pendingImages) {
                 throwIfCancelled();
@@ -945,7 +944,10 @@ export function createEbookExport({
                 });
             }
 
-            throwIfCancelled(); // Check for cancellation before saving the packaged file.
+            throwIfCancelled();
+            state.stage = 'packaging';
+            state.message = 'Packaging EPUB…';
+            notify();
             const archive = await buildEpub({
                 title: book.title,
                 author: book.author,
@@ -955,7 +957,7 @@ export function createEbookExport({
             });
             throwIfCancelled();
             saveBlob(archive, sanitizeFilename(book.title) + '.epub');
-            state.message = 'Export complete. Chapters: ' + fetched.length + '. Images: ' + imageCount;
+            state.message = 'EPUB sent to browser downloads. Chapters: ' + fetched.length + '. Images: ' + imageCount;
         } catch (err) {
             const where = failedChapter && failedChapter.title ? '"' + failedChapter.title + '": ' : '';
             state.message = err.name === 'ExportCancelled'

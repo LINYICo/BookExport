@@ -1,18 +1,8 @@
 (() => {
-    const panel = document.createElement('div');
-    panel.id = 'greenflame-export';
-    panel.lang = 'en';
-
-    const button = document.createElement('button');
-    button.type = 'button';
-
-    const status = document.createElement('p');
-    status.setAttribute('role', 'status');
-    panel.append(button, status);
-
+    const ports = new Set();
+    let readerPath = location.pathname;
     let exporter;
-    let loading = false;
-    let readerPath = '';
+    let pendingDownload;
 
     async function fetchAsset(url) {
         const response = await chrome.runtime.sendMessage({ type: 'FETCH_ASSET', url });
@@ -20,59 +10,67 @@
         return Uint8Array.from(atob(response.data), (character) => character.charCodeAt(0));
     }
 
-    function refresh() {
-        const view = exporter.viewState();
-        button.disabled = view.disabled;
-        button.textContent = view.label;
-        button.title = view.title;
-        status.textContent = view.message;
+    function viewState() {
+        return {
+            available: readerPath.startsWith('/web/reader/'),
+            bookTitle: document.title,
+            ...exporter?.viewState()
+        };
     }
 
-    async function toggleExport() {
+    function publish() {
+        const state = viewState();
+        for (const port of ports) {
+            try {
+                port.postMessage(state);
+            } catch {
+                ports.delete(port);
+            }
+        }
+    }
+
+    async function toggleDownload(port) {
+        if (!viewState().available) return;
         if (exporter) {
             exporter.toggle();
             return;
         }
-        if (loading) return;
+        if (pendingDownload) return;
 
-        loading = true;
-        button.disabled = true;
-        status.textContent = 'Loading exporter…';
-        const path = readerPath;
+        const request = {};
+        pendingDownload = request;
         try {
             const { createEbookExport } = await import(chrome.runtime.getURL('lib/epub-export.js'));
-            exporter = createEbookExport({ doc: document, win: window, fetchAsset, onStateChange: refresh });
-            refresh();
-            if (readerPath === path) exporter.toggle();
+            if (pendingDownload !== request) return;
+            exporter = createEbookExport({ doc: document, win: window, fetchAsset, onStateChange: publish });
+            exporter.toggle();
         } catch (error) {
-            status.textContent = 'Could not load the exporter. Refresh the reader page and try again.';
-            console.error('[Greenflame] Could not load the exporter', error);
+            if (ports.has(port)) {
+                port.postMessage({ ...viewState(), message: 'Refresh the reader and try again.' });
+            }
+            console.error('[BookExport] Could not load the exporter', error);
         } finally {
-            loading = false;
-            if (!exporter) button.disabled = false;
+            if (pendingDownload === request) pendingDownload = undefined;
         }
     }
 
-    function updateReader() {
-        const path = location.pathname;
-        if (path === readerPath) return;
-        if (exporter?.viewState().running) exporter.toggle();
+    chrome.runtime.onConnect.addListener((port) => {
+        if (port.name !== 'book-download') return;
+        ports.add(port);
+        port.onDisconnect.addListener(() => ports.delete(port));
+        port.onMessage.addListener((message) => {
+            if (message === 'toggle-download') toggleDownload(port);
+        });
+        port.postMessage(viewState());
+    });
 
-        readerPath = path;
-        if (!path.startsWith('/web/reader/')) {
-            panel.remove();
-            return;
-        }
-
-        document.body.append(panel);
-        if (exporter) {
-            refresh();
-        } else {
-            button.textContent = 'Export book';
-        }
-    }
-
-    button.addEventListener('click', toggleExport);
-    window.navigation.addEventListener('currententrychange', updateReader);
-    updateReader();
+    window.navigation.addEventListener('currententrychange', () => {
+        if (readerPath === location.pathname) return;
+        const previous = exporter;
+        readerPath = location.pathname;
+        exporter = undefined;
+        pendingDownload = undefined;
+        if (previous?.viewState().running) previous.toggle();
+        publish();
+    });
 })();

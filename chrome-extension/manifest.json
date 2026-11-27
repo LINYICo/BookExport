@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Greenflame",
+  "name": "BookExport",
   "version": "0.1.0",
   "description": "Export books from WeRead as EPUB files.",
   "minimum_chrome_version": "110",
@@ -9,13 +9,20 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "action": {
+    "default_title": "BookExport",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
       "matches": ["https://weread.qq.com/*"],
-      "css": ["export.css"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
