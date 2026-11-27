@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "微信读书 · 悦读助手",
-  "version": "1.2.0",
-  "description": "宽屏显示｜自定义背景色｜沉浸式阅读｜自动阅读｜配置持久化",
+  "name": "Greenflame",
+  "version": "0.1.0",
+  "description": "将微信读书中的电子书导出为 EPUB。",
+  "minimum_chrome_version": "110",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -13,37 +14,20 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://weread.qq.com/web/reader/*"],
+      "matches": ["https://weread.qq.com/*"],
+      "css": ["export.css"],
       "js": ["content.js"],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": ["https://weread.qq.com/"],
-      "js": ["douban.js"],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": ["https://weread.qq.com/"],
-      "js": ["zlib.js"],
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["storage"],
   "host_permissions": [
-    "https://www.douban.com/*",
-    "https://res.weread.qq.com/*",
     "https://*.weread.qq.com/*",
     "https://*.tencent-cloud.com/*",
-    "https://*.myqcloud.com/*",
-    "https://z-lib.sk/*",
-    "https://zh.z-library.im/*",
-    "https://z-lib.fm/*",
-    "https://libb.la/*",
-    "https://zh.libb.la/*"
+    "https://*.myqcloud.com/*"
   ],
   "web_accessible_resources": [
     {
-      "resources": ["lib/*.js"],
+      "resources": ["lib/epub-export.js"],
       "matches": ["https://weread.qq.com/*"]
     }
   ]

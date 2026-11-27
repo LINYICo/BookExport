@@ -684,11 +684,19 @@ export function createEbookExport({
 
     function viewState() {
         if (state.phase === 'running') {
-            return { disabled: false, label: '取消 ' + state.done + '/' + state.total, title: '导出中，再次点击取消' };
+            return {
+                running: true,
+                disabled: cancelRequested,
+                label: cancelRequested ? '正在取消…' : '取消 ' + state.done + '/' + state.total,
+                title: '导出中，再次点击取消',
+                message: ''
+            };
         }
         return {
+            running: false,
             disabled: !hasBookContext(),
             label: '导出本书',
+            message: state.message,
             title: state.message || '把当前书导出为 EPUB 文件（个人备份）'
         };
     }
@@ -944,6 +952,7 @@ export function createEbookExport({
                 css,
                 now: Date.now()
             });
+            throwIfCancelled();
             saveBlob(archive, sanitizeFilename(book.title) + '.epub');
             state.message = '已导出 ' + fetched.length + ' 章 / ' + imageCount + ' 图';
         } catch (err) {
@@ -952,6 +961,8 @@ export function createEbookExport({
                 ? '已取消导出'
                 : '导出失败：' + where + err.message;
         } finally {
+            token.stopped = true;
+            activeToken = null;
             state.phase = 'idle';
             cancelRequested = false;
             notify();
@@ -962,9 +973,10 @@ export function createEbookExport({
         if (state.phase === 'running') {
             cancelRequested = true;
             if (activeToken) activeToken.stopped = true;
+            notify();
             return;
         }
-        run();
+        if (hasBookContext()) run();
     }
 
     return { toggle, viewState };

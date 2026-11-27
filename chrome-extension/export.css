@@ -1,0 +1,40 @@
+#greenflame-export {
+    position: fixed;
+    z-index: 10000;
+    right: 20px;
+    bottom: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    max-width: min(350px, calc(100vw - 40px));
+    font: 14px/1.5 system-ui, sans-serif;
+}
+
+#greenflame-export button {
+    border: 0;
+    border-radius: 8px;
+    padding: 9px 14px;
+    color: white;
+    background: #176449;
+    font: inherit;
+    cursor: pointer;
+}
+
+#greenflame-export button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+}
+
+#greenflame-export p {
+    margin: 0;
+    border-radius: 6px;
+    padding: 5px 9px;
+    color: white;
+    background: #24332d;
+    overflow-wrap: anywhere;
+}
+
+#greenflame-export p:empty {
+    padding: 0;
+}
