@@ -1,10 +1,10 @@
-// 微信读书章节接口协议 + EPUB 打包 + 导出装配
-// 协议依据 finlater/weread.koplugin 参考实现逆向所得（取证 2026-08-30，
-// 本地副本 .scratch/epub-export/ref/，微信读书改版时先看签名/解码层测试是否变红）。
-// 纯函数层顶层不触碰 chrome API 与 DOM；浏览器装配只经工厂注入的 doc/win/fetch。
+// WeRead chapter API, EPUB packaging, and browser integration.
+// Protocol reference: finlater/weread.koplugin, examined on 2026-08-30.
+// See the signing and decoding tests when WeRead changes its reader.
+// Pure functions run without browser globals. The factory supplies browser dependencies.
 
-// ======================== MD5（RFC 1321） ========================
-// 接口校验与 b/c 编码必需，浏览器无内置 MD5，手写最小实现
+// MD5 (RFC 1321)
+// The API uses MD5 for integrity checks and b/c encoding. Web Crypto does not provide it.
 
 const MD5_SHIFT = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
@@ -69,8 +69,8 @@ export function md5Hex(input) {
     return hex;
 }
 
-// ======================== b/c 编码 ========================
-// bookId/chapterUid/ct → 编码串，与阅读页 URL hash 同源的正向函数
+// b/c encoding
+// Encode a book ID, chapter UID, or timestamp using the reader URL hash format.
 
 export function wereadE(value) {
     const s = String(value);
@@ -100,7 +100,7 @@ export function wereadE(value) {
     return result;
 }
 
-// ======================== 签名 ========================
+// Request signing
 
 function jsString(value) {
     if (value === true) return 'true';
@@ -109,7 +109,7 @@ function jsString(value) {
     return String(value);
 }
 
-// 对齐 Python urllib.parse.quote(safe='')：encodeURIComponent 不转义 !'()*，此处补齐
+// Match Python's urllib.parse.quote(safe='') by also escaping !'()*.
 function quoteParam(value) {
     return encodeURIComponent(jsString(value))
         .replace(/[!'()*]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
@@ -134,7 +134,7 @@ export function wereadSign(query) {
     return (a + b).toString(16);
 }
 
-// 组装分片请求参数；now（毫秒）与 random（[0,1)）注入保证可测
+// Inject time in milliseconds and a random number in [0, 1) for deterministic requests.
 export function buildContentParams({ bookId, chapterUid, psvts, now, random, style = false, sc = 1 }) {
     let ctValue = Math.floor(now / 1000);
     let ct = String(ctValue);
@@ -157,8 +157,8 @@ export function buildContentParams({ bookId, chapterUid, psvts, now, random, sty
     return params;
 }
 
-// ======================== 响应校验与解码 ========================
-// 分片响应 = 前 32 字符大写 MD5 前缀 + 置乱体；逆交换后 base64url 还原为 XHTML
+// Response validation and decoding
+// Each shard has a 32-character uppercase MD5 prefix. Undo the swaps before decoding base64url.
 
 export function checkedBody(responseText) {
     if (responseText.length <= 32) return '';
@@ -166,7 +166,7 @@ export function checkedBody(responseText) {
     const body = responseText.slice(32);
     const actual = md5Hex(body).toUpperCase();
     if (actual !== expected) {
-        throw new Error('分片 MD5 校验失败: expected=' + expected + ', actual=' + actual);
+        throw new Error('Shard MD5 mismatch: expected=' + expected + ', actual=' + actual);
     }
     return body;
 }
@@ -179,7 +179,7 @@ export function swapPositions(encoded) {
     const n = Math.min(4, Math.floor((length + 9) / 10));
     let tmp = '';
     for (let i = length - 1; i >= length - n; i--) {
-        // 二进制位串按四进制解读（参考实现原样行为）
+        // The reference implementation interprets the binary digits in base four.
         tmp += parseInt(encoded.charCodeAt(i).toString(2), 4);
     }
 
@@ -241,18 +241,18 @@ export function decodeStyleShard(e2) {
     return decodePayload(checkedBody(e2));
 }
 
-// ======================== 页面状态解析 ========================
+// Reader state
 
-// content script 隔离世界读不到页面 JS 全局（如 window.__INITIAL_STATE__），
-// 与参考实现同款：GET 阅读页源码后正则提取 + JSON 解析
+// The isolated content script cannot read the page's JavaScript globals.
+// Fetch the reader HTML to extract and parse the initial state.
 export function extractInitialState(readerHtml) {
     const match = readerHtml.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;\s*\(function/);
-    if (!match) throw new Error('阅读页源码中未找到 __INITIAL_STATE__，页面可能已改版');
+    if (!match) throw new Error('Could not find __INITIAL_STATE__ in the reader HTML. The page layout may have changed.');
     let state;
     try {
         state = JSON.parse(match[1]);
     } catch (err) {
-        throw new Error('__INITIAL_STATE__ 解析失败：' + err.message);
+        throw new Error('Could not parse __INITIAL_STATE__: ' + err.message);
     }
     return state;
 }
@@ -261,7 +261,7 @@ export function parseReaderState(initialState) {
     const reader = (initialState && initialState.reader) || {};
     const bookInfo = reader.bookInfo || {};
     const bookId = String(bookInfo.bookId || '');
-    if (!bookId) throw new Error('未找到书籍信息（reader.bookInfo.bookId），请确认在阅读页中');
+    if (!bookId) throw new Error('Missing reader.bookInfo.bookId. Open a book in the WeRead reader.');
     return {
         bookId,
         title: bookInfo.title || bookId,
@@ -270,7 +270,7 @@ export function parseReaderState(initialState) {
     };
 }
 
-// ======================== 目录归一化与章节筛选 ========================
+// Catalog normalization and chapter selection
 
 export function normalizeCatalog(payload, bookId) {
     let candidates;
@@ -281,7 +281,7 @@ export function normalizeCatalog(payload, bookId) {
         else if (Array.isArray(payload.books)) candidates = payload.books;
         else candidates = [payload];
     } else {
-        throw new Error('chapterInfos 响应结构异常');
+        throw new Error('Unexpected chapterInfos response format');
     }
 
     for (const item of candidates) {
@@ -292,18 +292,19 @@ export function normalizeCatalog(payload, bookId) {
             return chapters.filter((ch) => ch && typeof ch === 'object' && ch.chapterUid);
         }
     }
-    throw new Error('未找到 bookId=' + bookId + ' 的目录');
+    throw new Error('No catalog found for book ID ' + bookId);
 }
 
 export function selectExportableChapters(chapters) {
-    return chapters.filter((ch) => Number(ch.wordCount || 0) > 0 && String(ch.title || '') !== '封面');
+    // WeRead uses this localized title for the cover entry.
+    return chapters.filter((ch) => Number(ch.wordCount || 0) > 0 && String(ch.title || '') !== '\u5c01\u9762');
 }
 
-// ======================== 正文处理 ========================
+// Chapter content
 
-// ======================== 图片资产 ========================
-// 章节图片（含代码清单图）放在微信读书的章节 tar 里：下载 → 解包 → 按成员名
-// 重写正文 img 的 src 为 EPUB 内部路径；拿不到图的 img 降级为 alt 占位，不再无声消失。
+// Image assets
+// Chapter images, including images of code listings, are embedded in the EPUB when available.
+// Use the image's alternative text as a placeholder if the download fails.
 
 function bytesStartWith(data, magic) {
     if (data.length < magic.length) return false;
@@ -330,8 +331,8 @@ function decodeTarString(header, at, length) {
     return new TextDecoder('utf-8').decode(header.subarray(at, end));
 }
 
-// 收集正文中 img 的 src（去重、保序）。src 即该图在微信读书 CDN 上的唯一地址，
-// 是图片内容唯一可靠的身份标识——tar 成员名与文档顺序都不可作映射依据
+// Collect unique image URLs in document order. The full CDN URL identifies each image.
+// Archive member names and document positions can vary.
 export function collectImageSources(source) {
     const out = [];
     const seen = new Set();
@@ -358,8 +359,8 @@ function decodeXmlEntities(value) {
         .replace(/&#x27;|&#39;/g, "'");
 }
 
-// 一趟处理全部 img：src 在 srcMap（完整 src → 内部路径）中的改写为内部路径；
-// 未命中的（下载失败/非图片响应）降级为占位文本（有 alt 用 alt，没有用 [图]）
+// Replace each downloaded image URL with its EPUB path.
+// Use a text placeholder when an image is missing or the server returns another file type.
 export function finalizeChapterSource(source, srcMap) {
     return source.replace(/<img\b[^>]*>/gi, (tag) => {
         const srcMatch = tag.match(/(?<![\w-])src=(["'])([\s\S]*?)\1/i);
@@ -369,7 +370,7 @@ export function finalizeChapterSource(source, srcMap) {
             if (href) return tag.replace(srcMatch[0], 'src=' + srcMatch[1] + href + srcMatch[1]);
         }
         const alt = tag.match(/\balt=(["'])(.*?)\1/i);
-        return alt && alt[2] ? '[插图：' + alt[2] + ']' : '[图]';
+        return alt && alt[2] ? '[Illustration: ' + alt[2] + ']' : '[Image]';
     });
 }
 
@@ -406,7 +407,7 @@ export function makeChapterXhtml(title, source, cssHref = '../styles/weread.css'
         + '</html>\n';
 }
 
-// ======================== EPUB 打包 ========================
+// EPUB packaging
 
 const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
@@ -445,7 +446,7 @@ function writeUint32LE(target, value, at) {
     target[at + 3] = (value >>> 24) & 0xff;
 }
 
-// 最小 zip 容器：STORED / DEFLATE，UTF-8 文件名标志位
+// Minimal ZIP writer with stored and deflated entries and UTF-8 filenames.
 export async function buildZip(entries, { now }) {
     const encoder = new TextEncoder();
     const date = new Date(now);
@@ -531,8 +532,8 @@ function chapterFileName(index) {
     return 'text/chapter_' + String(index).padStart(4, '0') + '.xhtml';
 }
 
-// chapters: [{ title, source, assets? }]；source 为接口解码出的 XHTML（img 已由装配层
-// 经 finalizeChapterSource 重写为内部路径或占位），assets 为本章图片字节
+// Each chapter contains a title, XHTML source, and optional image assets.
+// Image references in the source already point to EPUB paths or have been replaced with placeholders.
 export async function buildEpub({ title, author, chapters, css, now }) {
     const encoder = new TextEncoder();
     const text = (value) => encoder.encode(value);
@@ -544,9 +545,9 @@ export async function buildEpub({ title, author, chapters, css, now }) {
     ).join('\n');
     const nav = '<?xml version="1.0" encoding="utf-8"?>\n'
         + '<!DOCTYPE html>\n'
-        + '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">\n'
+        + '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">\n'
         + '<head><meta charset="utf-8"/><title>Table of Contents</title></head>\n'
-        + '<body>\n  <nav epub:type="toc" id="toc">\n    <h1>目录</h1>\n    <ol>\n'
+        + '<body>\n  <nav epub:type="toc" id="toc">\n    <h1>Table of Contents</h1>\n    <ol>\n'
         + navItems + '\n    </ol>\n  </nav>\n</body>\n</html>\n';
 
     const manifestChapters = chapters.map((ch, i) =>
@@ -623,7 +624,7 @@ export async function buildEpub({ title, author, chapters, css, now }) {
         { name: 'OEBPS/styles/weread.css', data: text(css || 'body { line-height: 1.6; }\n') }
     ];
     allAssets.forEach((asset) => {
-        // 图片本身已压缩，zip 内 STORED
+        // Store compressed images directly in the ZIP archive.
         entries.push({ name: 'OEBPS/' + asset.href, data: asset.data, compress: false });
     });
     chapters.forEach((ch, i) => {
@@ -640,11 +641,11 @@ export function sanitizeFilename(name) {
     return String(name).replace(/[\\/:*?"<>|]/g, '').trim() || 'weread-export';
 }
 
-// ======================== 浏览器装配 ========================
+// Browser integration
 
 class ExportCancelled extends Error {
     constructor() {
-        super('已取消导出');
+        super('Export cancelled');
         this.name = 'ExportCancelled';
     }
 }
@@ -663,7 +664,7 @@ export function createEbookExport({
     imageDelayMs = defaultImageDelayMs,
     imageConcurrency = defaultImageConcurrency,
     emptyRetryDelaysMs = [3000, 8000],
-    fetchAsset = () => Promise.reject(new Error('未提供图片下载通道'))
+    fetchAsset = () => Promise.reject(new Error('No image downloader is available'))
 }) {
     const state = { phase: 'idle', done: 0, total: 0, message: '' };
     let cancelRequested = false;
@@ -675,7 +676,7 @@ export function createEbookExport({
 
     function hasBookContext() {
         try {
-            // location 归 DOM，隔离世界可见；页面 JS 全局不可见
+            // The isolated content script can read the URL through the DOM.
             return /^\/web\/reader\//.test(win.location.pathname);
         } catch {
             return false;
@@ -687,17 +688,17 @@ export function createEbookExport({
             return {
                 running: true,
                 disabled: cancelRequested,
-                label: cancelRequested ? '正在取消…' : '取消 ' + state.done + '/' + state.total,
-                title: '导出中，再次点击取消',
+                label: cancelRequested ? 'Cancelling…' : 'Cancel ' + state.done + '/' + state.total,
+                title: 'Export in progress. Click to cancel.',
                 message: ''
             };
         }
         return {
             running: false,
             disabled: !hasBookContext(),
-            label: '导出本书',
+            label: 'Export book',
             message: state.message,
-            title: state.message || '把当前书导出为 EPUB 文件（个人备份）'
+            title: state.message || 'Save a personal copy of this book as an EPUB'
         };
     }
 
@@ -711,11 +712,11 @@ export function createEbookExport({
             headers: { 'Content-Type': 'application/json;charset=UTF-8' },
             body: JSON.stringify(body)
         });
-        if (!resp.ok) throw new Error('接口 HTTP ' + resp.status + '：' + path);
+        if (!resp.ok) throw new Error('API request failed with HTTP ' + resp.status + ': ' + path);
         return resp.text();
     }
 
-    // 官方续期端点：succ 时响应会更新 wr_skey cookie，后续同源请求自动携带新值
+    // Successful renewal updates wr_skey for subsequent same-origin requests.
     async function renewSession() {
         try {
             const text = await postText('/web/login/renewal', { rq: '%2Fweb%2Fbook%2Fread', ql: false });
@@ -725,35 +726,35 @@ export function createEbookExport({
         }
     }
 
-    // 单次分片请求。协议文档：{} = 参数、登录态、购买权、sc/st 之一有问题；
-    // errcode -2012 = 登录超时。两类错误都交给 postShard 的续期重试
+    // An empty object can indicate invalid parameters, an expired session, or missing access.
+    // Error -2012 indicates an expired session. postShard handles renewal and retries.
     async function postShardOnce(path, params) {
         const text = await postText(path, params);
         if (text.indexOf('"errcode"') !== -1) {
             let code = '';
-            try { code = String(JSON.parse(text).errcode || ''); } catch { /* 用原始响应提示 */ }
+            try { code = String(JSON.parse(text).errcode || ''); } catch { /* Use the raw response for the error message. */ }
             const err = new Error(code === '-2012'
-                ? '登录已失效（-2012）'
-                : '接口返回错误' + (code ? ' ' + code : '') + '：' + text.slice(0, 120));
+                ? 'Session expired (-2012)'
+                : 'API error' + (code ? ' ' + code : '') + ': ' + text.slice(0, 120));
             err.kind = code === '-2012' ? 'auth' : 'fatal';
             throw err;
         }
         if (text === '{}') {
-            const err = new Error('返回空内容');
+            const err = new Error('returned an empty response');
             err.kind = 'empty';
             throw err;
         }
         return text;
     }
 
-    // 空响应/登录失效不立即放弃：退避 + 续期后重试（购买权在本会话内不会变化，
-    // 空响应多半是会话过期或限流窗口）；其他错误码立即抛出
+    // Back off and renew after an empty response or an expired session.
+    // Other errors propagate immediately.
     async function postShard(path, params) {
         let lastError = null;
         for (let attempt = 0; attempt <= emptyRetryDelaysMs.length; attempt++) {
             if (attempt > 0) {
                 await sleep(emptyRetryDelaysMs[attempt - 1]);
-                throwIfCancelled(); // 取消落在退避里时，不再向续期端点发请求
+                throwIfCancelled(); // Skip renewal if cancelled during backoff.
                 await renewSession();
             }
             try {
@@ -764,10 +765,10 @@ export function createEbookExport({
             }
         }
         if (lastError.kind === 'auth') {
-            throw new Error(path + ' ' + lastError.message + '，续期重试仍失败，请刷新页面重新登录');
+            throw new Error(path + ' ' + lastError.message + '. Session renewal did not resolve the error. Refresh the page and sign in again.');
         }
-        throw new Error(path + ' ' + lastError.message + '（已重试 ' + emptyRetryDelaysMs.length
-            + ' 次），可能是登录态过期或触发风控：建议刷新页面重新登录、休息几分钟后重试');
+        throw new Error(path + ' ' + lastError.message + ' after ' + emptyRetryDelaysMs.length
+            + ' retries. Your session may have expired or WeRead may be limiting requests. Refresh the page, sign in again, and retry in a few minutes.');
     }
 
     function throwIfCancelled() {
@@ -781,7 +782,7 @@ export function createEbookExport({
             now: Date.now(), random: Math.random()
         }));
         if (e0.startsWith('{') && e0.indexOf('"bookId"') !== -1) {
-            throw new Error('该书为 TXT 型内容（网文），暂不支持导出');
+            throw new Error('Export is unavailable for TXT-format web novels.');
         }
         shards.e0 = e0;
         throwIfCancelled();
@@ -799,10 +800,10 @@ export function createEbookExport({
         return decodeContentShards(shards.e0, shards.e1, shards.e3);
     }
 
-    // 图片按 src 逐张下载（src 即图片在 CDN 上的唯一地址）。单张失败降级占位。
-    // 章内并发池：文件名按收集序号生成（与完成顺序无关），整体聚合速率 =
-    // imageConcurrency / (imageDelayMs + 单次往返)。取消经令牌生效：worker 在
-    // 下一轮自行退出，不受 run finally 复位 cancelRequested 的影响
+    // Download each unique image URL and use placeholders for individual failures.
+    // Each chapter has its own worker pool. Assign filenames in source order.
+    // Throughput depends on concurrency, request latency, and the delay between requests.
+    // Workers check the export token even after the UI cancellation flag resets.
     async function fetchChapterImages(source, chapterIndex, token) {
         const srcs = collectImageSources(source);
         const srcMap = {};
@@ -818,14 +819,14 @@ export function createEbookExport({
                 try {
                     const bytes = await fetchAsset(src);
                     const kind = imageExtensionAndType(bytes);
-                    if (!kind) throw new Error('非图片响应');
+                    if (!kind) throw new Error('The response was not an image');
                     const href = 'images/ch' + String(chapterIndex + 1).padStart(4, '0')
                         + '_img' + String(k + 1).padStart(3, '0') + kind.ext;
                     srcMap[src] = '../' + href;
                     assets.push({ href, mediaType: kind.mediaType, data: bytes });
                 } catch (err) {
                     if (err.name === 'ExportCancelled' || token.stopped) throw err;
-                    // 单张失败留空 → finalize 降级为占位文本
+                    // Leave failed downloads unmapped so the chapter gets a placeholder.
                 }
                 if (cursor < srcs.length) await sleep(imageDelayMs());
             }
@@ -842,7 +843,7 @@ export function createEbookExport({
             }));
             return decodeStyleShard(e2);
         } catch {
-            return ''; // 本章 CSS 拉不到时留空（不走重试，避免逐章重试风暴），后续章节继续尝试
+            return ''; // Try a later chapter for CSS instead of retrying this one.
         }
     }
 
@@ -860,23 +861,23 @@ export function createEbookExport({
 
     async function fetchReaderState() {
         const resp = await fetch(win.location.href);
-        if (!resp.ok) throw new Error('获取阅读页失败：HTTP ' + resp.status);
+        if (!resp.ok) throw new Error('Could not load the reader page: HTTP ' + resp.status);
         return parseReaderState(extractInitialState(await resp.text()));
     }
 
-    // psvts 有效期有限（参考实现每章刷新一次；《Rust权威指南》实测长导出中途
-    // 全部返空、renewal 无效——psvts 绑定页面会话而非 cookie）。每章前取一份新鲜的
+    // The page-scoped psvts token can expire during long exports.
+    // Refresh it before each chapter because cookie renewal alone cannot refresh it.
     async function refreshPsvts(book) {
         try {
             const fresh = await fetchReaderState();
             if (fresh.bookId === book.bookId && fresh.psvts) book.psvts = fresh.psvts;
         } catch {
-            // 刷新失败沿用旧值，由分片重试兜底
+            // Keep the previous token and let the shard retry logic handle failures.
         }
     }
 
-    // 每次导出一个独立取消令牌：run 的 finally 会复位 cancelRequested，
-    // 但仍在 sleep/往返中的图片 worker 靠令牌退出——令牌不复位，随 run 一起作废
+    // Each export owns a cancellation token that stays cancelled after the UI resets.
+    // Image workers can check it when a delayed or in-flight request returns.
     async function run() {
         const token = { stopped: false };
         activeToken = token;
@@ -890,16 +891,16 @@ export function createEbookExport({
 
         try {
             const book = await fetchReaderState();
-            if (!book.psvts) throw new Error('页面缺少 psvts，请刷新阅读页后重试');
+            if (!book.psvts) throw new Error('Missing psvts token. Refresh the reader page and try again.');
             const catalogText = await postText('/web/book/chapterInfos', { bookIds: [book.bookId] });
             let catalog;
             try {
                 catalog = JSON.parse(catalogText);
             } catch {
-                throw new Error('chapterInfos 响应解析失败：' + catalogText.slice(0, 120));
+                throw new Error('Could not parse the chapterInfos response: ' + catalogText.slice(0, 120));
             }
             const chapters = selectExportableChapters(normalizeCatalog(catalog, book.bookId));
-            if (!chapters.length) throw new Error('没有可导出的章节');
+            if (!chapters.length) throw new Error('No chapters are available to export.');
             state.total = chapters.length;
             notify();
 
@@ -916,9 +917,9 @@ export function createEbookExport({
                 }
                 const chapter = chapters[i];
                 const source = await fetchChapterSource(book, chapter);
-                // 图片池立即开跑但不等待——与后续章节的内容抓取重叠（图片走 CDN，内容走 API）
+                // Start image downloads while subsequent chapters are being fetched.
                 const pool = fetchChapterImages(source, i, token);
-                pool.catch(() => {}); // 取消/失败早于收拢时，池拒绝也需有人接住
+                pool.catch(() => {}); // Handle early rejections until the pools are awaited.
                 pendingImages.push({
                     chapterTitle: String(chapter.title || chapter.chapterUid),
                     source,
@@ -932,7 +933,7 @@ export function createEbookExport({
                 }
             }
 
-            // 收拢各章图片池，回填 src → 内部路径
+            // Wait for image downloads before rewriting URLs to EPUB paths.
             for (const pending of pendingImages) {
                 throwIfCancelled();
                 const { srcMap, assets } = await pending.images;
@@ -944,7 +945,7 @@ export function createEbookExport({
                 });
             }
 
-            throwIfCancelled(); // 打包+保存耗时数秒，此间取消则不产出文件
+            throwIfCancelled(); // Check for cancellation before saving the packaged file.
             const archive = await buildEpub({
                 title: book.title,
                 author: book.author,
@@ -954,12 +955,12 @@ export function createEbookExport({
             });
             throwIfCancelled();
             saveBlob(archive, sanitizeFilename(book.title) + '.epub');
-            state.message = '已导出 ' + fetched.length + ' 章 / ' + imageCount + ' 图';
+            state.message = 'Export complete. Chapters: ' + fetched.length + '. Images: ' + imageCount;
         } catch (err) {
-            const where = failedChapter && failedChapter.title ? '《' + failedChapter.title + '》' : '';
+            const where = failedChapter && failedChapter.title ? '"' + failedChapter.title + '": ' : '';
             state.message = err.name === 'ExportCancelled'
-                ? '已取消导出'
-                : '导出失败：' + where + err.message;
+                ? 'Export cancelled'
+                : 'Export failed: ' + where + err.message;
         } finally {
             token.stopped = true;
             activeToken = null;

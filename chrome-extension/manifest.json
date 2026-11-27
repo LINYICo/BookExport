@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Greenflame",
   "version": "0.1.0",
-  "description": "将微信读书中的电子书导出为 EPUB。",
+  "description": "Export books from WeRead as EPUB files.",
   "minimum_chrome_version": "110",
   "icons": {
     "16": "icons/icon16.png",

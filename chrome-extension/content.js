@@ -1,6 +1,7 @@
 (() => {
     const panel = document.createElement('div');
     panel.id = 'greenflame-export';
+    panel.lang = 'en';
 
     const button = document.createElement('button');
     button.type = 'button';
@@ -15,7 +16,7 @@
 
     async function fetchAsset(url) {
         const response = await chrome.runtime.sendMessage({ type: 'FETCH_ASSET', url });
-        if (!response?.ok) throw new Error(response?.error || '图片下载失败');
+        if (!response?.ok) throw new Error(response?.error || 'Could not download the image');
         return Uint8Array.from(atob(response.data), (character) => character.charCodeAt(0));
     }
 
@@ -36,7 +37,7 @@
 
         loading = true;
         button.disabled = true;
-        status.textContent = '正在加载导出组件…';
+        status.textContent = 'Loading exporter…';
         const path = readerPath;
         try {
             const { createEbookExport } = await import(chrome.runtime.getURL('lib/epub-export.js'));
@@ -44,8 +45,8 @@
             refresh();
             if (readerPath === path) exporter.toggle();
         } catch (error) {
-            status.textContent = '加载失败，请刷新阅读页后重试。';
-            console.error('[Greenflame] 加载导出组件失败', error);
+            status.textContent = 'Could not load the exporter. Refresh the reader page and try again.';
+            console.error('[Greenflame] Could not load the exporter', error);
         } finally {
             loading = false;
             if (!exporter) button.disabled = false;
@@ -67,7 +68,7 @@
         if (exporter) {
             refresh();
         } else {
-            button.textContent = '导出本书';
+            button.textContent = 'Export book';
         }
     }
 

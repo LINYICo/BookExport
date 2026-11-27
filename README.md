@@ -1,16 +1,16 @@
 # Greenflame
 
-Greenflame 是一个浏览器扩展，可将微信读书中当前账号有权阅读的 EPUB 型书籍导出为 `.epub` 文件，包含章节、目录和可下载的插图。
+Greenflame exports EPUB books you can read with your WeRead account. The downloaded file includes the chapters, a table of contents, and any illustrations the extension can retrieve.
 
-## 安装与使用
+## Installation and use
 
-1. 在项目目录运行 `pnpm install --frozen-lockfile`。开发环境使用 Node.js 24 或更新版本，pnpm 版本见 `package.json`。
-2. 在 Dia 或 Chrome 打开扩展管理页，开启开发者模式，选择「加载已解压的扩展程序」，选中项目内的 `chrome-extension` 目录。使用 Chrome 110 或更新版本，Dia 使用支持 Manifest V3 的版本。
-3. 在浏览器中登录微信读书并打开一本书，点击阅读页右下角的「导出本书」。按钮会显示进度，再次点击可取消。
-4. 导出的文件会出现在浏览器下载记录中。网文 TXT 型书目暂不支持。图片下载失败时，EPUB 会保留图片占位。
+1. Install Node.js 24 or later and the pnpm version specified in `package.json`. Run `pnpm install --frozen-lockfile` in the project directory.
+2. Open the extensions page in Chrome 110 or later, or in a version of Dia that supports Manifest V3. Enable **Developer mode**, click **Load unpacked**, and select the `chrome-extension` directory.
+3. Sign in to WeRead and open a book. Click **Export book** in the lower-right corner of the reader. The button shows progress. Click it again to cancel.
+4. Find the EPUB in your browser's downloads. If an illustration cannot be downloaded, the EPUB includes a placeholder. TXT-format web novels are currently unsupported.
 
-扩展直接加载源码，无需构建。正文请求沿用浏览器中的微信读书会话，插图由扩展后台下载，EPUB 在浏览器内打包。导出前请确认有权保存相应内容。
+The browser loads the extension directly from source. It uses your WeRead session to retrieve chapters, downloads illustrations through the extension's service worker, and packages the EPUB locally. Before exporting, make sure you have permission to save the book.
 
-开发时可用 `pnpm test` 运行 EPUB 导出模块的单元测试。
+Run `pnpm test` to test the EPUB exporter.
 
-Greenflame 派生自 [WeRead Plus](https://github.com/EwenYoung/weread-plus)，遵循 [MIT 许可证](LICENSE)。
+Greenflame is derived from [WeRead Plus](https://github.com/EwenYoung/weread-plus) and is distributed under the [MIT license](LICENSE).

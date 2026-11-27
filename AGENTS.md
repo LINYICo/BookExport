@@ -1,7 +1,7 @@
 # Greenflame
 
-Greenflame 是微信读书的 EPUB 导出扩展。提交、注释和项目文档使用中文。提交信息使用 `type: 描述`。
+Greenflame is an EPUB export extension for WeRead. Use English for interface text, commit messages, comments, tests, and project documentation. Write commit messages in the form `type: description`.
 
-扩展目录为 `chrome-extension/`，可直接在支持 Manifest V3 的浏览器中加载。阅读页入口为 `content.js`，通过 `chrome.runtime.getURL` 动态加载 `lib/epub-export.js`。导出模块通过工厂接收浏览器依赖，纯函数可在 Node.js 中调用。跨域图片通过 `background.js` 下载。调整图片来源时，检查 Manifest 的宿主权限是否覆盖 CDN 重定向链。
+Load `chrome-extension/` directly in a browser that supports Manifest V3. The reader entry point, `content.js`, uses `chrome.runtime.getURL` to load `lib/epub-export.js` dynamically. The export module receives browser dependencies through a factory. Its pure functions can run in Node.js. The service worker in `background.js` downloads cross-origin images. When changing image sources, check that the manifest's host permissions cover the CDN redirect chain.
 
-编码规范见 `CLEAN-CODE.md`。EPUB 导出测试使用 `pnpm test`。
+Follow the coding guidelines in `CLEAN-CODE.md`. Run the EPUB export tests with `pnpm test`.

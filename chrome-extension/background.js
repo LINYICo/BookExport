@@ -1,4 +1,4 @@
-// 章节图片由扩展的 Service Worker 代理，响应使用 Base64 通过消息传回。
+// The service worker downloads chapter images and returns their bytes as Base64.
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request?.type !== 'FETCH_ASSET' || sender.origin !== 'https://weread.qq.com') return;
 
@@ -10,14 +10,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function fetchAssetBase64(url) {
     if (typeof url !== 'string' || !/^https:\/\/([a-z0-9-]+\.)*weread\.qq\.com\//.test(url)) {
-        throw new Error('仅支持 weread.qq.com 资源');
+        throw new Error('Only weread.qq.com assets are supported');
     }
 
     const response = await fetch(url, {
         credentials: 'omit',
         signal: AbortSignal.timeout(15000)
     });
-    if (!response.ok) throw new Error('图片资源 HTTP ' + response.status);
+    if (!response.ok) throw new Error('Image request failed with HTTP ' + response.status);
 
     const bytes = new Uint8Array(await response.arrayBuffer());
     let binary = '';
