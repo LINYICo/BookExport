@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GOLDEN_SHARDS } from './fixtures/shards.js';
+import { EPUB_SHARDS } from './fixtures/epub-shards.js';
 
 const workspace = await mkdtemp(join(tmpdir(), 'bookexport-test-'));
 const profile = join(workspace, 'profile');
@@ -65,7 +65,7 @@ try {
     const { targetId: reader } = await send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await send('Target.attachToTarget', { targetId: reader, flatten: true });
     await send('Fetch.enable', { patterns: [{ urlPattern: 'https://weread.qq.com/*' }] }, sessionId);
-    const [firstShard, middleShard, lastShard] = GOLDEN_SHARDS;
+    const [firstShard, middleShard, lastShard] = EPUB_SHARDS;
     const chapterResponses = new Map([['e_0', firstShard], ['e_1', middleShard], ['e_3', lastShard], ['e_2', '']]);
     let holdFirstShard = true;
     const heldShard = Promise.withResolvers();
@@ -170,9 +170,10 @@ try {
     await Promise.race([completed, delay(5000, undefined, { ref: false }).then(() => {
         throw new Error('Chrome did not finish downloading the EPUB');
     })]);
-    const archive = await readFile(downloadPath + '/Fixture Book.epub');
-    assert.equal(archive.subarray(0, 4).toString('hex'), '504b0304');
-    console.log('Chrome verified the download panel, request cancellation, restart, and saved EPUB.');
+    execFileSync(process.env.EPUBCHECK_BIN || 'epubcheck', [
+        '--failonwarnings', join(downloadPath, 'Fixture Book.epub')
+    ], { stdio: 'inherit', timeout: 20000 });
+    console.log('Chrome saved a valid EPUB after cancelling and restarting the download.');
 } finally {
     clearTimeout(timeout);
     chrome.kill();

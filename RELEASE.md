@@ -1,5 +1,17 @@
 # Release history
 
+## v0.3.0 - 2026-11-28
+
+### Fixed
+
+- Omit the creator field when WeRead provides no author.
+- Time out stalled reader and chapter requests after 20 seconds and show how to retry the download.
+
+### Tests
+
+- Download a complete EPUB in Chrome and validate it with EPUBCheck in CI.
+- Cover timeouts while waiting for the reader and while reading a chapter response.
+
 ## v0.2.0 - 2026-11-27
 
 ### Changed

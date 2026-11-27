@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BookExport",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Export books from WeRead as EPUB files.",
   "minimum_chrome_version": "110",
   "icons": {

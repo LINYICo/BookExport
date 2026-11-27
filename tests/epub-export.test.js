@@ -396,6 +396,16 @@ test('buildEpub supplies a fallback stylesheet', async () => {
     assert.ok(entries.get('OEBPS/styles/weread.css').text().includes('line-height'));
 });
 
+test('buildEpub omits the creator when the author is missing or blank', async () => {
+    for (const author of [undefined, '', '  ']) {
+        const archive = await buildEpub({
+            title: 'Book', author, chapters: [{ title: 'Chapter', source: '<p>x</p>' }], css: '', now: 0
+        });
+        const opf = readZipEntries(archive).get('OEBPS/content.opf').text();
+        assert.doesNotMatch(opf, /<dc:creator\b/);
+    }
+});
+
 test('buildEpub stores images without compression and lists them in the manifest', async () => {
     const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9]);
     const archive = await buildEpub({
@@ -595,3 +605,45 @@ test('cancelling during shard backoff finishes without renewing the session', { 
     assert.equal(calls.length, 3);
     assert.ok(calls.at(-1).endsWith('/e_0'));
 });
+
+for (const step of ['reader request', 'chapter response body']) {
+    test('timeouts abort the ' + step + ' and leave the download available', { timeout: 1500 }, async (t) => {
+        const readerURL = 'https://weread.qq.com/web/reader/42';
+        const readerHtml = '<script>window.__INITIAL_STATE__ = '
+            + '{"reader":{"bookInfo":{"bookId":"42","title":"Test Book"},"psvts":"ps-token"}};(function(){});</script>';
+        const catalog = JSON.stringify({
+            data: [{ bookId: '42', updated: [{ chapterUid: 1, title: 'Chapter One', wordCount: 100 }] }]
+        });
+        const finished = Promise.withResolvers();
+        let pendingSignal;
+        function waitForAbort(signal) {
+            pendingSignal = signal;
+            return new Promise((_, reject) => {
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            });
+        }
+        t.mock.method(globalThis, 'fetch', async (url, { signal }) => {
+            if (url === readerURL) {
+                if (step === 'reader request') return waitForAbort(signal);
+                return { ok: true, text: async () => readerHtml };
+            }
+            if (url.endsWith('/chapterInfos')) return { ok: true, text: async () => catalog };
+            assert.ok(url.endsWith('/e_0'));
+            return { ok: true, text: () => waitForAbort(signal) };
+        });
+
+        const exporter = createEbookExport({
+            doc: {},
+            win: { location: { href: readerURL, pathname: '/web/reader/42' } },
+            requestTimeoutMs: 30,
+            onStateChange: () => {
+                if (!exporter.viewState().running) finished.resolve(exporter.viewState());
+            }
+        });
+        exporter.toggle();
+        const result = await finished.promise;
+        assert.equal(pendingSignal?.aborted, true);
+        assert.equal(result.disabled, false);
+        assert.match(result.message, /did not respond in time.*Download EPUB to try again/);
+    });
+}

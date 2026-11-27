@@ -1,0 +1,6 @@
+// Encoded shards for a valid XHTML chapter used by the Chrome smoke test.
+export const EPUB_SHARDS = [
+    'F167238D673A153C26D36E9C91021C54ZPGh0bWwgeG1sbnC9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkve',
+    'F1C1B23841F448FF3B2E5512B0AEF8E7Gh0bWwiPjxib2R5PjxwPkEgY2hhcM9lciBmb3IgdGhlIGJyb3d',
+    'FC8E14A404450D07AC2C841E99A45DD1zZXIgLx93bmdGYWQg3AVzdC48ZGv-PHRib2R5PjwvaHRtbD4'
+];

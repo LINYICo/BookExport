@@ -28,7 +28,7 @@ pnpm test
 pnpm test:chrome
 ```
 
-The Chrome smoke test uses a clean profile and a local WeRead fixture. Set `CHROME_BIN` if Chrome is installed at a custom path. GitHub Actions runs both test suites.
+The Chrome smoke test uses a clean profile and a local WeRead fixture. Install Chrome and [EPUBCheck](https://www.w3.org/publishing/epubcheck/docs/installation/) to run it. Set `CHROME_BIN` or `EPUBCHECK_BIN` if either executable is installed at a custom path. GitHub Actions runs both test suites.
 
 ## License
 

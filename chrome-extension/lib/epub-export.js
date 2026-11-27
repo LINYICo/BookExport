@@ -531,6 +531,7 @@ export async function buildEpub({ title, author, chapters, css, now }) {
     const text = (value) => encoder.encode(value);
     const bookUuid = 'urn:uuid:' + uuid4();
     const modified = new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const creator = String(author ?? '').trim();
 
     const navItems = chapters.map((ch, i) =>
         '      <li><a href="' + chapterFileName(i + 1) + '">' + escapeXml(ch.title) + '</a></li>'
@@ -567,7 +568,7 @@ export async function buildEpub({ title, author, chapters, css, now }) {
         + '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
         + '    <dc:identifier id="bookid">' + escapeXml(bookUuid) + '</dc:identifier>\n'
         + '    <dc:title>' + escapeXml(title) + '</dc:title>\n'
-        + '    <dc:creator>' + escapeXml(author) + '</dc:creator>\n'
+        + (creator ? '    <dc:creator>' + escapeXml(creator) + '</dc:creator>\n' : '')
         + '    <dc:language>zh-CN</dc:language>\n'
         + '    <meta property="dcterms:modified">' + modified + '</meta>\n'
         + '  </metadata>\n'
@@ -656,6 +657,7 @@ export function createEbookExport({
     imageDelayMs = defaultImageDelayMs,
     imageConcurrency = defaultImageConcurrency,
     emptyRetryDelaysMs = [3000, 8000],
+    requestTimeoutMs = 20000,
     fetchAsset = () => Promise.reject(new Error('No image downloader is available'))
 }) {
     const state = { phase: 'idle', done: 0, total: 0, message: '', stage: '' };
@@ -708,15 +710,36 @@ export function createEbookExport({
         });
     }
 
-    async function postText(path, body) {
-        const resp = await fetch(path, {
+    async function fetchText(url, options, httpError) {
+        const exportSignal = controller.signal;
+        exportSignal.throwIfAborted();
+
+        const request = new AbortController();
+        const cancelRequest = () => request.abort(exportSignal.reason);
+        exportSignal.addEventListener('abort', cancelRequest, { once: true });
+        const timeout = setTimeout(() => {
+            request.abort(new Error('WeRead did not respond in time. Click Download EPUB to try again.'));
+        }, requestTimeoutMs);
+
+        try {
+            const response = await fetch(url, { ...options, signal: request.signal });
+            if (!response.ok) throw new Error(httpError(response.status));
+            return await response.text();
+        } catch (error) {
+            request.signal.throwIfAborted();
+            throw error;
+        } finally {
+            clearTimeout(timeout);
+            exportSignal.removeEventListener('abort', cancelRequest);
+        }
+    }
+
+    function postText(path, body) {
+        return fetchText(path, {
             method: 'POST',
-            signal: controller.signal,
             headers: { 'Content-Type': 'application/json;charset=UTF-8' },
             body: JSON.stringify(body)
-        });
-        if (!resp.ok) throw new Error('API request failed with HTTP ' + resp.status + ': ' + path);
-        return resp.text();
+        }, (status) => 'API request failed with HTTP ' + status + ': ' + path);
     }
 
     // Successful renewal updates wr_skey for subsequent same-origin requests.
@@ -865,9 +888,8 @@ export function createEbookExport({
     }
 
     async function fetchReaderState() {
-        const resp = await fetch(win.location.href, { signal: controller.signal });
-        if (!resp.ok) throw new Error('Could not load the reader page: HTTP ' + resp.status);
-        return parseReaderState(extractInitialState(await resp.text()));
+        const html = await fetchText(win.location.href, {}, (status) => 'Could not load the reader page: HTTP ' + status);
+        return parseReaderState(extractInitialState(html));
     }
 
     // The page-scoped psvts token can expire during long exports.
