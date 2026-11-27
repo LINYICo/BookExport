@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BookExport",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Export books from WeRead as EPUB files.",
   "minimum_chrome_version": "110",
   "icons": {
@@ -11,7 +11,6 @@
   },
   "action": {
     "default_title": "BookExport",
-    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"
@@ -34,7 +33,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["lib/epub-export.js"],
+      "resources": ["popup.js", "popup.css", "lib/epub-export.js"],
       "matches": ["https://weread.qq.com/*"]
     }
   ]

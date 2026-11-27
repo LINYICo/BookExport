@@ -1,22 +1,37 @@
 # BookExport
 
-BookExport exports EPUB books you can read with your WeRead account. The downloaded file includes the chapters, a table of contents, and any illustrations the extension can retrieve.
+BookExport is a browser extension that downloads WeRead books as EPUB files. It uses your existing WeRead session and packages chapters, a table of contents, and available illustrations locally.
 
-## Installation and use
+[Download the latest release](https://github.com/LINYICo/BookExport/releases/latest) · [Release history](RELEASE.md)
 
-1. Open the extensions page in Chrome 110 or later, or in a version of Dia that supports Manifest V3. Enable **Developer mode**, click **Load unpacked**, and select the `chrome-extension` directory.
-2. Sign in to WeRead and open a book. Left-click the **BookExport** toolbar icon and click **Download EPUB**. The popup shows progress and lets you cancel. Reopen it at any time to check the download while the reader tab stays open.
-3. Find the EPUB in your browser's downloads. If an illustration cannot be downloaded, the EPUB includes a placeholder. TXT-format web novels are currently unsupported.
+## Install
 
-The browser loads the extension directly from source. It uses your WeRead session to retrieve chapters, downloads illustrations through the extension's service worker, and packages the EPUB locally. Before exporting, make sure you have permission to save the book.
+1. Download the BookExport ZIP from GitHub Releases and extract it.
+2. Open the extensions page in Chrome 110 or later, or in a version of Dia with Manifest V3 support.
+3. Enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
 
-## Development environment
+When installing from a source checkout, select `chrome-extension/`.
 
-| Tool | Release channel |
-| --- | --- |
-| Node.js | Latest LTS (minimum supported version: 24) |
-| pnpm | Latest (`pnpm@latest`) |
+## Download a book
 
-Run `pnpm test` to test the EPUB exporter. The project has no third-party npm dependencies. If you run `pnpm install`, pnpm will skip lockfile generation.
+1. Sign in to [WeRead](https://weread.qq.com/) and open a book you can read.
+2. Click **BookExport** in the browser toolbar, then click **Download EPUB**.
+3. Follow progress in the panel. You can close it and reopen it while the reader tab stays open.
+4. Find the EPUB in your browser's downloads. Use **Cancel download** to stop an export in progress.
 
-BookExport is derived from [WeRead Plus](https://github.com/EwenYoung/weread-plus) and is distributed under the [MIT license](LICENSE).
+BookExport supports EPUB-format books. TXT-format web novels are unsupported. If an illustration fails to download, the EPUB includes a placeholder. Export only books you have permission to save.
+
+## Development
+
+Use the latest Node.js LTS (minimum 24) and the latest pnpm. The extension loads directly from source and has no third-party npm dependencies.
+
+```sh
+pnpm test
+pnpm test:chrome
+```
+
+The Chrome smoke test uses a clean profile and a local WeRead fixture. Set `CHROME_BIN` if Chrome is installed at a custom path. GitHub Actions runs both test suites.
+
+## License
+
+BookExport is derived from [WeRead Plus](https://github.com/EwenYoung/weread-plus) and distributed under the [MIT license](LICENSE).

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { GOLDEN_SHARDS } from './fixtures/shards.js';
 import {
     md5Hex,
     wereadE,
@@ -73,12 +74,6 @@ const GOLDEN_PARAMS_COLLISION = {
 const DECODE_PARA = '<p>\u7b2c\u4e00\u6bb5\uff1a\u4e2d\u6587\u4e0e ASCII \u6df7\u6392 mixed 123\u3002</p><p>\u7b2c\u4e8c\u6bb5 <b>\u52a0\u7c97</b> \u4e0e <i>\u659c\u4f53</i>\u3002</p>';
 const GOLDEN_DECODED = DECODE_PARA.repeat(8) + '<p>\uFFFF</p>'.repeat(8);
 
-
-const GOLDEN_SHARDS = [
-    'A21735CEF482C7C8BFE32DE72A6E90CFZPHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHlz56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A_PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwva',
-    '38526522324D96A9EE0030763CB91A94T7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5p7-5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeyA-wvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPua',
-    '762972A1179F63BFE1DAFE8533D80427WnOS9kzwvaT7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A-PHA-56ys5LiA5q6177ya5Lit5paH5LiOIEFTQ0lJIOa3t-aOkiBtaXhlZCAxMjPjgII8L3A-PHA-56ys5LqM5q61IDxiPuWKoOeylzwvYj4g5LiOIDxpPuaWnOS9kzwvaT7jgII8L3A-PHA-7aH_PC9wPjxwPu-_vzwvcD48cD7vv788L3A-PHA-77--PC9wPjxwPu-_vzwvcD48cD7vv788L3A-PHA-77-_PC9wPjxwPu-_vzwvcD4='
-];
 
 // Derive the payload from the shards to avoid duplicating a long fixture.
 // Each shard's MD5 prefix checks its transcription.
@@ -561,4 +556,42 @@ test('sanitizeFilename removes invalid filename characters', () => {
     assert.equal(sanitizeFilename('a/b:c*d?"<>|'), 'abcd');
     assert.equal(sanitizeFilename('  Continuous Delivery 2.0 '), 'Continuous Delivery 2.0');
     assert.equal(sanitizeFilename('???'), 'bookexport');
+});
+
+test('cancelling during shard backoff finishes without renewing the session', { timeout: 1500 }, async (t) => {
+    const readerHtml = '<script>window.__INITIAL_STATE__ = '
+        + '{"reader":{"bookInfo":{"bookId":"42","title":"Test Book"},"psvts":"ps-token"}};(function(){});</script>';
+    const catalog = JSON.stringify({
+        data: [{ bookId: '42', updated: [{ chapterUid: 1, title: 'Chapter One', wordCount: 100 }] }]
+    });
+    const calls = [];
+    const firstShard = Promise.withResolvers();
+    const finished = Promise.withResolvers();
+    t.mock.method(globalThis, 'fetch', async (url) => {
+        calls.push(url);
+        if (url.endsWith('/e_0')) {
+            return { ok: true, text: async () => {
+                firstShard.resolve();
+                return '{}';
+            } };
+        }
+        return { ok: true, text: async () => url.endsWith('/chapterInfos') ? catalog : readerHtml };
+    });
+
+    const exporter = createEbookExport({
+        doc: {},
+        win: { location: { href: 'https://weread.qq.com/web/reader/42', pathname: '/web/reader/42' } },
+        emptyRetryDelaysMs: [1000],
+        onStateChange: () => {
+            if (!exporter.viewState().running) finished.resolve();
+        }
+    });
+    exporter.toggle();
+    await firstShard.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    exporter.toggle();
+    await finished.promise;
+    assert.equal(exporter.viewState().message, 'Export cancelled');
+    assert.equal(calls.length, 3);
+    assert.ok(calls.at(-1).endsWith('/e_0'));
 });

@@ -659,8 +659,7 @@ export function createEbookExport({
     fetchAsset = () => Promise.reject(new Error('No image downloader is available'))
 }) {
     const state = { phase: 'idle', done: 0, total: 0, message: '', stage: '' };
-    let cancelRequested = false;
-    let activeToken = null;
+    let controller;
 
     function notify() {
         onStateChange();
@@ -679,11 +678,11 @@ export function createEbookExport({
         if (state.phase === 'running') {
             return {
                 running: true,
-                disabled: cancelRequested,
+                disabled: controller.signal.aborted,
                 done: state.done,
                 total: state.total,
                 chapterProgress: state.stage === 'chapters',
-                message: cancelRequested ? 'Cancelling download…' : state.message
+                message: controller.signal.aborted ? 'Cancelling download…' : state.message
             };
         }
         return {
@@ -694,13 +693,25 @@ export function createEbookExport({
         };
     }
 
-    function sleep(ms) {
-        return new Promise((resolve) => setTimeout(resolve, ms));
+    function sleep(ms, signal = controller.signal) {
+        return new Promise((resolve, reject) => {
+            signal.throwIfAborted();
+            const timer = setTimeout(() => {
+                signal.removeEventListener('abort', cancel);
+                resolve();
+            }, ms);
+            function cancel() {
+                clearTimeout(timer);
+                reject(signal.reason);
+            }
+            signal.addEventListener('abort', cancel, { once: true });
+        });
     }
 
     async function postText(path, body) {
         const resp = await fetch(path, {
             method: 'POST',
+            signal: controller.signal,
             headers: { 'Content-Type': 'application/json;charset=UTF-8' },
             body: JSON.stringify(body)
         });
@@ -714,6 +725,7 @@ export function createEbookExport({
             const text = await postText('/web/login/renewal', { rq: '%2Fweb%2Fbook%2Fread', ql: false });
             return JSON.parse(text).succ === 1;
         } catch {
+            throwIfCancelled();
             return false;
         }
     }
@@ -764,7 +776,7 @@ export function createEbookExport({
     }
 
     function throwIfCancelled() {
-        if (cancelRequested) throw new ExportCancelled();
+        controller.signal.throwIfAborted();
     }
 
     async function fetchChapterSource(book, chapter) {
@@ -795,32 +807,32 @@ export function createEbookExport({
     // Download each unique image URL and use placeholders for individual failures.
     // Each chapter has its own worker pool. Assign filenames in source order.
     // Throughput depends on concurrency, request latency, and the delay between requests.
-    // Workers check the export token even after the UI cancellation flag resets.
-    async function fetchChapterImages(source, chapterIndex, token) {
+    async function fetchChapterImages(source, chapterIndex, signal) {
         const srcs = collectImageSources(source);
         const srcMap = {};
         const assets = [];
         let cursor = 0;
         const worker = async () => {
             while (true) {
-                if (token.stopped) throw new ExportCancelled();
+                signal.throwIfAborted();
                 const k = cursor;
                 if (k >= srcs.length) return;
                 cursor += 1;
                 const src = srcs[k];
                 try {
-                    const bytes = await fetchAsset(src);
+                    const bytes = await fetchAsset(src, signal);
+                    signal.throwIfAborted();
                     const kind = imageExtensionAndType(bytes);
                     if (!kind) throw new Error('The response was not an image');
                     const href = 'images/ch' + String(chapterIndex + 1).padStart(4, '0')
                         + '_img' + String(k + 1).padStart(3, '0') + kind.ext;
                     srcMap[src] = '../' + href;
                     assets.push({ href, mediaType: kind.mediaType, data: bytes });
-                } catch (err) {
-                    if (err.name === 'ExportCancelled' || token.stopped) throw err;
+                } catch {
+                    signal.throwIfAborted();
                     // Leave failed downloads unmapped so the chapter gets a placeholder.
                 }
-                if (cursor < srcs.length) await sleep(imageDelayMs());
+                if (cursor < srcs.length) await sleep(imageDelayMs(), signal);
             }
         };
         await Promise.all(Array.from({ length: Math.min(imageConcurrency, srcs.length) }, () => worker()));
@@ -835,6 +847,7 @@ export function createEbookExport({
             }));
             return decodeStyleShard(e2);
         } catch {
+            throwIfCancelled();
             return ''; // Try a later chapter for CSS instead of retrying this one.
         }
     }
@@ -852,7 +865,7 @@ export function createEbookExport({
     }
 
     async function fetchReaderState() {
-        const resp = await fetch(win.location.href);
+        const resp = await fetch(win.location.href, { signal: controller.signal });
         if (!resp.ok) throw new Error('Could not load the reader page: HTTP ' + resp.status);
         return parseReaderState(extractInitialState(await resp.text()));
     }
@@ -864,21 +877,19 @@ export function createEbookExport({
             const fresh = await fetchReaderState();
             if (fresh.bookId === book.bookId && fresh.psvts) book.psvts = fresh.psvts;
         } catch {
+            throwIfCancelled();
             // Keep the previous token and let the shard retry logic handle failures.
         }
     }
 
-    // Each export owns a cancellation token that stays cancelled after the UI resets.
-    // Image workers can check it when a delayed or in-flight request returns.
     async function run() {
-        const token = { stopped: false };
-        activeToken = token;
+        controller = new AbortController();
+        const { signal } = controller;
         state.phase = 'running';
         state.done = 0;
         state.total = 0;
         state.message = 'Preparing download…';
         state.stage = 'preparing';
-        cancelRequested = false;
         let failedChapter = null;
         notify();
 
@@ -913,7 +924,7 @@ export function createEbookExport({
                 const chapter = chapters[i];
                 const source = await fetchChapterSource(book, chapter);
                 // Start image downloads while subsequent chapters are being fetched.
-                const pool = fetchChapterImages(source, i, token);
+                const pool = fetchChapterImages(source, i, signal);
                 pool.catch(() => {}); // Handle early rejections until the pools are awaited.
                 pendingImages.push({
                     chapterTitle: String(chapter.title || chapter.chapterUid),
@@ -960,22 +971,20 @@ export function createEbookExport({
             state.message = 'EPUB sent to browser downloads. Chapters: ' + fetched.length + '. Images: ' + imageCount;
         } catch (err) {
             const where = failedChapter && failedChapter.title ? '"' + failedChapter.title + '": ' : '';
-            state.message = err.name === 'ExportCancelled'
+            state.message = signal.aborted || err.name === 'ExportCancelled'
                 ? 'Export cancelled'
                 : 'Export failed: ' + where + err.message;
         } finally {
-            token.stopped = true;
-            activeToken = null;
+            controller.abort(new ExportCancelled());
+            controller = undefined;
             state.phase = 'idle';
-            cancelRequested = false;
             notify();
         }
     }
 
     function toggle() {
         if (state.phase === 'running') {
-            cancelRequested = true;
-            if (activeToken) activeToken.stopped = true;
+            controller.abort(new ExportCancelled());
             notify();
             return;
         }

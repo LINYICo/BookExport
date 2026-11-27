@@ -1,35 +1,45 @@
 (() => {
-    const ports = new Set();
+    let panel;
+    let openingPanel = false;
     let readerPath = location.pathname;
     let exporter;
     let pendingDownload;
 
-    async function fetchAsset(url) {
-        const response = await chrome.runtime.sendMessage({ type: 'FETCH_ASSET', url });
-        if (!response?.ok) throw new Error(response?.error || 'Could not download the image');
-        return Uint8Array.from(atob(response.data), (character) => character.charCodeAt(0));
+    async function fetchAsset(url, signal) {
+        signal.throwIfAborted();
+        const port = chrome.runtime.connect({ name: 'book-image' });
+        let cancel;
+        try {
+            const response = await new Promise((resolve, reject) => {
+                cancel = () => reject(signal.reason);
+                signal.addEventListener('abort', cancel, { once: true });
+                port.onMessage.addListener(resolve);
+                port.onDisconnect.addListener(() => {
+                    reject(new Error(chrome.runtime.lastError?.message || 'Image connection closed'));
+                });
+                port.postMessage(url);
+            });
+            if (!response.ok) throw new Error(response.error);
+            return Uint8Array.from(atob(response.data), (character) => character.charCodeAt(0));
+        } finally {
+            if (cancel) signal.removeEventListener('abort', cancel);
+            port.disconnect();
+        }
     }
 
     function viewState() {
         return {
             available: readerPath.startsWith('/web/reader/'),
-            bookTitle: document.title,
+            bookTitle: document.title.replace(/\s*[-–—|｜]\s*\u5fae\u4fe1\u8bfb\u4e66\s*$/, '').trim(),
             ...exporter?.viewState()
         };
     }
 
     function publish() {
-        const state = viewState();
-        for (const port of ports) {
-            try {
-                port.postMessage(state);
-            } catch {
-                ports.delete(port);
-            }
-        }
+        panel?.render(viewState());
     }
 
-    async function toggleDownload(port) {
+    async function toggleDownload() {
         if (!viewState().available) return;
         if (exporter) {
             exporter.toggle();
@@ -45,27 +55,39 @@
             exporter = createEbookExport({ doc: document, win: window, fetchAsset, onStateChange: publish });
             exporter.toggle();
         } catch (error) {
-            if (ports.has(port)) {
-                port.postMessage({ ...viewState(), message: 'Refresh the reader and try again.' });
-            }
+            panel?.render({ ...viewState(), message: 'Refresh the reader and try again.' });
             console.error('[BookExport] Could not load the exporter', error);
         } finally {
             if (pendingDownload === request) pendingDownload = undefined;
         }
     }
 
-    chrome.runtime.onConnect.addListener((port) => {
-        if (port.name !== 'book-download') return;
-        ports.add(port);
-        port.onDisconnect.addListener(() => ports.delete(port));
-        port.onMessage.addListener((message) => {
-            if (message === 'toggle-download') toggleDownload(port);
-        });
-        port.postMessage(viewState());
+    async function togglePanel() {
+        if (openingPanel) return;
+        openingPanel = true;
+        try {
+            if (!panel) {
+                const { createDownloadPanel } = await import(chrome.runtime.getURL('popup.js'));
+                panel = await createDownloadPanel({ onDownload: toggleDownload });
+            }
+            publish();
+            panel.toggle();
+        } catch (error) {
+            console.error('[BookExport] Could not open the download panel', error);
+        } finally {
+            openingPanel = false;
+        }
+    }
+
+    chrome.runtime.onMessage.addListener((message, sender) => {
+        if (sender.id === chrome.runtime.id && message?.type === 'TOGGLE_DOWNLOAD_PANEL') {
+            togglePanel();
+        }
     });
 
     window.navigation.addEventListener('currententrychange', () => {
         if (readerPath === location.pathname) return;
+        panel?.close(false);
         const previous = exporter;
         readerPath = location.pathname;
         exporter = undefined;

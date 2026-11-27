@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: EPUB unit tests
+        run: node --test tests/epub-export.test.js
+      - name: Chrome download smoke test
+        run: CHROME_BIN="$(command -v google-chrome)" node tests/chrome-smoke.mjs
