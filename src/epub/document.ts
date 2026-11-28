@@ -1,43 +1,6 @@
+import { httpsURL } from '../resource.ts';
+import { escapeXml, languageTag, validXmlText } from '../text.ts';
 import { rewriteCss, type ResolveResource } from './css.ts';
-function bytesStartWith(data: Uint8Array, magic: number[]) {
-    if (data.length < magic.length) return false;
-    for (let i = 0; i < magic.length; i++) {
-        if (data[i] !== magic[i]) return false;
-    }
-    return true;
-}
-
-export function imageExtensionAndType(data: Uint8Array) {
-    if (bytesStartWith(data, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-        return { ext: '.png', mediaType: 'image/png' };
-    if (bytesStartWith(data, [0xff, 0xd8, 0xff])) return { ext: '.jpg', mediaType: 'image/jpeg' };
-    if (bytesStartWith(data, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]))
-        return { ext: '.gif', mediaType: 'image/gif' };
-    if (bytesStartWith(data, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))
-        return { ext: '.gif', mediaType: 'image/gif' };
-    if (
-        bytesStartWith(data, [0x52, 0x49, 0x46, 0x46]) &&
-        bytesStartWith(data.subarray(8), [0x57, 0x45, 0x42, 0x50])
-    )
-        return { ext: '.webp', mediaType: 'image/webp' };
-    return null;
-}
-
-function validXmlText(source: string) {
-    return source.replace(/[\p{Cc}\uD800-\uDFFF\uFFFE\uFFFF]/gu, (character) => {
-        const code = character.charCodeAt(0);
-        return '\t\n\r'.includes(character) || (code >= 127 && code <= 159) ? character : '\ufffd';
-    });
-}
-
-export function escapeXml(value: unknown) {
-    return validXmlText(String(value))
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;');
-}
 
 export function parseChapter(source: string, readerUrl: string, catalogHref?: string) {
     const clean = validXmlText(source);
@@ -150,25 +113,6 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
                 root.getAttribute('lang'),
         ),
     };
-}
-
-export function httpsURL(value: string, base: string) {
-    if (!value.trim()) return undefined;
-    try {
-        const url = new URL(value, base);
-        if (url.protocol === 'https:' && !url.username && !url.password && !url.port) return url;
-    } catch {
-        return undefined;
-    }
-}
-
-export function languageTag(value: unknown) {
-    if (typeof value !== 'string' || !value.trim()) return;
-    try {
-        return Intl.getCanonicalLocales(value)[0];
-    } catch {
-        return undefined;
-    }
 }
 
 type ParsedChapter = ReturnType<typeof parseChapter>;

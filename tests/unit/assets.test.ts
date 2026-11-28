@@ -2,10 +2,70 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createAssetQueue } from '../../src/assets.ts';
 import { readBounded } from '../../src/io.ts';
-import { resourceURL, type ResourceResponse } from '../../src/resource.ts';
+import { httpsURL, resourceFormat, resourceURL, type ResourceResponse } from '../../src/resource.ts';
 
 const base = 'https://assets.weread.qq.com/books/intro.xhtml';
 const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+test('resourceFormat identifies images by their signatures', () => {
+    assert.deepEqual(
+        resourceFormat(
+            new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1]),
+        ),
+        { ext: '.png', mediaType: 'image/png' },
+    );
+    assert.deepEqual(resourceFormat(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1])), {
+        ext: '.jpg',
+        mediaType: 'image/jpeg',
+    });
+    assert.deepEqual(resourceFormat(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])), {
+        ext: '.gif',
+        mediaType: 'image/gif',
+    });
+    assert.deepEqual(resourceFormat(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])), {
+        ext: '.gif',
+        mediaType: 'image/gif',
+    });
+    assert.deepEqual(
+        resourceFormat(
+            new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]),
+        ),
+        { ext: '.webp', mediaType: 'image/webp' },
+    );
+    assert.equal(resourceFormat(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])), null);
+    assert.equal(
+        resourceFormat(new Uint8Array([0xff, 0xd8])),
+        null,
+        'truncated data is rejected',
+    );
+});
+
+test('resourceFormat identifies fonts by their signatures', () => {
+    for (const [signature, ext] of [
+        ['wOF2', '.woff2'],
+        ['wOFF', '.woff'],
+        ['OTTO', '.otf'],
+    ] as const) {
+        assert.equal(resourceFormat(new TextEncoder().encode(signature))?.ext, ext);
+    }
+    assert.deepEqual(resourceFormat(new Uint8Array([0, 1, 0, 0])), {
+        ext: '.ttf',
+        mediaType: 'font/ttf',
+    });
+    assert.equal(resourceFormat(new Uint8Array([0, 1, 0])), null);
+});
+
+test('HTTPS links and resource addresses use distinct host and fragment policies', () => {
+    const address = 'https://example.org/book#chapter';
+    assert.equal(httpsURL(address)?.href, address);
+    assert.equal(resourceURL(address), undefined);
+    assert.equal(httpsURL('#chapter', base)?.hash, '#chapter');
+    assert.equal(httpsURL(''), undefined);
+    assert.equal(httpsURL('invalid relative URL'), undefined);
+    assert.equal(httpsURL('http://weread.qq.com/'), undefined);
+    assert.equal(httpsURL('https://user@weread.qq.com/'), undefined);
+    assert.equal(httpsURL('https://weread.qq.com:123/'), undefined);
+});
 
 test('the book queue enforces its bound and assigns paths in discovery order', async () => {
     const active = new Map<string, ReturnType<typeof Promise.withResolvers<ResourceResponse>>>();

@@ -9,7 +9,8 @@ import {
     type ChapterDocument,
 } from './epub/document.ts';
 import { resourceURL, type FetchAsset, type ResourceReference } from './resource.ts';
-import { createWeReadClient, ExportError, wait } from './weread/client.ts';
+import { wait } from './io.ts';
+import { createWeReadClient, ExportError } from './weread/client.ts';
 
 type Stage =
     | 'idle'
@@ -204,13 +205,16 @@ export function createEbookExport({
             signal.throwIfAborted();
 
             const parser = new DOMParser();
+            function readBody(chapter: ChapterDocument) {
+                const body = parser.parseFromString(chapter.markup, 'application/xhtml+xml')
+                    .documentElement;
+                if (body.localName !== 'body') throw new Error('Could not prepare chapter XHTML.');
+                return body;
+            }
             await queue.recoverBudget(async (resolve, use) => {
                 for (const [index, chapter] of chapters.entries()) {
                     signal.throwIfAborted();
-                    const body = parser.parseFromString(
-                        chapter.markup,
-                        'application/xhtml+xml',
-                    ).documentElement;
+                    const body = readBody(chapter);
                     chapterResources(
                         body,
                         chapter.embeddedCss,
@@ -229,11 +233,7 @@ export function createEbookExport({
             const use = (path: string) => usedPaths.add(path);
             for (const [index, chapter] of chapters.entries()) {
                 signal.throwIfAborted();
-                const body = parser.parseFromString(
-                    chapter.markup,
-                    'application/xhtml+xml',
-                ).documentElement;
-                if (body.localName !== 'body') throw new Error('Could not prepare chapter XHTML.');
+                const body = readBody(chapter);
                 const embeddedCss = chapterResources(
                     body,
                     chapter.embeddedCss,

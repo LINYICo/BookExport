@@ -1,5 +1,5 @@
-import { languageTag } from '../epub/document.ts';
-import { ByteLimitError, readBounded } from '../io.ts';
+import { ByteLimitError, readBounded, wait } from '../io.ts';
+import { languageTag } from '../text.ts';
 import { buildContentParams, decodeContentShards, decodeStyleShard } from './protocol.ts';
 
 export interface Chapter {
@@ -152,21 +152,6 @@ export function selectExportableChapters(chapters: Chapter[]) {
         });
     }
     return result;
-}
-
-export function wait(ms: number, signal: AbortSignal) {
-    return new Promise<void>((resolve, reject) => {
-        signal.throwIfAborted();
-        const timer = setTimeout(() => {
-            signal.removeEventListener('abort', cancel);
-            resolve();
-        }, ms);
-        function cancel() {
-            clearTimeout(timer);
-            reject(signal.reason);
-        }
-        signal.addEventListener('abort', cancel, { once: true });
-    });
 }
 
 class ShardError extends Error {
