@@ -1,4 +1,5 @@
-import { chapterFileName, escapeXml, languageTag, makeChapterXhtml } from './document.ts';
+import { escapeXml, languageTag } from '../text.ts';
+import { chapterFileName, makeChapterXhtml } from './document.ts';
 import { buildZip, type ZipEntry } from './zip.ts';
 
 export interface EpubAsset {

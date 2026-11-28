@@ -1,5 +1,5 @@
-import { languageTag } from '../epub/document.ts';
-import { ByteLimitError, readBounded } from '../io.ts';
+import { ByteLimitError, readBounded, wait } from '../io.ts';
+import { languageTag } from '../text.ts';
 import { buildContentParams, decodeContentShards, decodeStyleShard } from './protocol.ts';
 
 export interface Chapter {
@@ -54,18 +54,6 @@ export function parseReaderState(state: unknown): Book {
     };
 }
 
-function isChapter(value: unknown): value is Omit<Chapter, 'href' | 'parentChapterUid'> {
-    const item = record(value);
-    return (
-        !!item.chapterUid &&
-        (typeof item.chapterUid === 'string' || typeof item.chapterUid === 'number') &&
-        (item.title === undefined || typeof item.title === 'string') &&
-        (item.wordCount === undefined ||
-            typeof item.wordCount === 'number' ||
-            typeof item.wordCount === 'string')
-    );
-}
-
 export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
     if (!payload || typeof payload !== 'object')
         throw new ExportError('Unexpected chapterInfos response format');
@@ -83,9 +71,19 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
         const chapters = item.updated ?? item.chapterInfos ?? item.chapters ?? [];
         if (!Array.isArray(chapters))
             throw new ExportError('Unexpected chapterInfos response format');
-        return chapters.filter(isChapter).map(({ chapterUid, title, wordCount, ...source }) => {
-            const { href, parentChapterUid } = record(source);
-            return {
+        const result: Chapter[] = [];
+        for (const value of chapters) {
+            const { chapterUid, title, wordCount, href, parentChapterUid } = record(value);
+            if (
+                !chapterUid ||
+                (typeof chapterUid !== 'string' && typeof chapterUid !== 'number') ||
+                (title !== undefined && typeof title !== 'string') ||
+                (wordCount !== undefined &&
+                    typeof wordCount !== 'number' &&
+                    typeof wordCount !== 'string')
+            )
+                continue;
+            result.push({
                 chapterUid,
                 ...(title !== undefined ? { title } : {}),
                 ...(wordCount !== undefined ? { wordCount } : {}),
@@ -93,8 +91,9 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
                 ...(typeof parentChapterUid === 'string' || typeof parentChapterUid === 'number'
                     ? { parentChapterUid: String(parentChapterUid) }
                     : {}),
-            };
-        });
+            });
+        }
+        return result;
     }
     throw new ExportError(
         'WeRead did not return a catalog. Sign in and check that you can read this book, then retry.',
@@ -152,21 +151,6 @@ export function selectExportableChapters(chapters: Chapter[]) {
         });
     }
     return result;
-}
-
-export function wait(ms: number, signal: AbortSignal) {
-    return new Promise<void>((resolve, reject) => {
-        signal.throwIfAborted();
-        const timer = setTimeout(() => {
-            signal.removeEventListener('abort', cancel);
-            resolve();
-        }, ms);
-        function cancel() {
-            clearTimeout(timer);
-            reject(signal.reason);
-        }
-        signal.addEventListener('abort', cancel, { once: true });
-    });
 }
 
 class ShardError extends Error {

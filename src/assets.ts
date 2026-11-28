@@ -1,6 +1,7 @@
 import { type EpubAsset } from './epub/builder.ts';
-import { imageExtensionAndType } from './epub/document.ts';
+import { wait } from './io.ts';
 import {
+    resourceFormat,
     resourceLimit,
     resourceURL,
     type FetchAsset,
@@ -8,21 +9,9 @@ import {
     type ResourceKind,
     type ResourceReference,
 } from './resource.ts';
-import { wait } from './weread/client.ts';
 
 const defaultBudget = 128 * 1024 * 1024;
 const maxPending = 32;
-
-function resourceFormat(bytes: Uint8Array) {
-    const image = imageExtensionAndType(bytes);
-    if (image) return image;
-    const magic = new TextDecoder().decode(bytes.subarray(0, 4));
-    if (magic === 'wOF2') return { ext: '.woff2', mediaType: 'font/woff2' };
-    if (magic === 'wOFF') return { ext: '.woff', mediaType: 'font/woff' };
-    if (magic === 'OTTO') return { ext: '.otf', mediaType: 'font/otf' };
-    if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 1 && bytes[2] === 0 && bytes[3] === 0)
-        return { ext: '.ttf', mediaType: 'font/ttf' };
-}
 
 type Job = {
     url: string;
@@ -70,10 +59,7 @@ export function createAssetQueue(
                 job.limitedAt = 0;
                 continue;
             }
-            // Allow both the response chunks and the outgoing contiguous buffer in the budget.
-            const reservation = limit * 2;
-            reserved += reservation;
-            const task = download(job, limit, reservation).finally(() => {
+            const task = download(job, limit).finally(() => {
                 active.delete(task);
                 pump();
             });
@@ -82,7 +68,11 @@ export function createAssetQueue(
         if (draining && !pending.length) noMoreRequests.abort();
     }
 
-    async function download(job: Job, limit: number, reservation: number) {
+    async function download(job: Job, limit: number) {
+        // Reserve both the response chunks and the outgoing contiguous buffer.
+        const reservation = limit * 2;
+        reserved += reservation;
+        delete job.limitedAt;
         try {
             const result = await fetchAsset(job.url, limit, signal);
             signal.throwIfAborted();
@@ -214,36 +204,50 @@ export function createAssetQueue(
             }
     }
 
-    // Only under budget pressure, resolve the whole book with limited jobs treated
-    // as available. This protects dependencies that a successful retry could restore.
+    // A failed retry can make another dependency disposable. Allow one additional
+    // recovery pass only when bytes were reclaimed and a retry was attempted.
     async function recoverBudget(
         scan: (resolve: typeof path, use: (path: string) => void) => void | Promise<void>,
     ) {
-        if (![...jobs.values()].some((job) => job.limitedAt !== undefined)) return;
-        const used = new Set<string>();
-        await scan(
-            (value, base, kind) => {
-                const url = resourceURL(value, base);
-                const job = url && jobs.get(url);
-                if (job && job.limitedAt !== undefined) return '../pending/' + job.index;
-                return path(value, base, kind);
-            },
-            (href) => used.add(href),
-        );
-        const before = retained;
-        discardUnused(used);
-        if (retained === before) return;
-        for (const job of jobs.values()) {
-            const limit = Math.min(maxResource, Math.floor((budget - retained) / 2));
-            if (
-                job.limitedAt === undefined ||
-                limit <= job.limitedAt ||
-                !used.has('../pending/' + job.index)
-            )
-                continue;
-            await wait(resourceDelayMs(), signal);
-            await download(job, limit, 0);
+        for (let pass = 0; pass < 2; pass++) {
             signal.throwIfAborted();
+            if (
+                ![...jobs.values()].some(
+                    (job) => job.status === 'limit' && job.limitedAt !== undefined,
+                )
+            )
+                return;
+            const used = new Set<string>();
+            await scan(
+                (value, base, kind) => {
+                    const url = resourceURL(value, base);
+                    const job = url && jobs.get(url);
+                    if (job && job.status === 'limit' && job.limitedAt !== undefined)
+                        return '../pending/' + job.index;
+                    return path(value, base, kind);
+                },
+                (href) => used.add(href),
+            );
+            signal.throwIfAborted();
+            const before = retained;
+            discardUnused(used);
+            if (retained === before) return;
+            let retried = false;
+            for (const job of jobs.values()) {
+                const limit = Math.min(maxResource, Math.floor((budget - retained) / 2));
+                if (
+                    job.status !== 'limit' ||
+                    job.limitedAt === undefined ||
+                    limit <= job.limitedAt ||
+                    !used.has('../pending/' + job.index)
+                )
+                    continue;
+                await wait(resourceDelayMs(), signal);
+                await download(job, limit);
+                signal.throwIfAborted();
+                retried = true;
+            }
+            if (!retried) return;
         }
     }
 

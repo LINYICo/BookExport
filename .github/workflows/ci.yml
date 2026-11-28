@@ -14,9 +14,14 @@ jobs:
         timeout-minutes: 10
         steps:
             - uses: actions/checkout@v7.0.1
+            - name: Resolve latest stable Node.js
+              id: node
+              run: |
+                  version=$(curl --fail --silent --show-error --retry 3 https://nodejs.org/dist/index.json | jq -er '[.[] | .version | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$")) | ltrimstr("v")] | max_by(split(".") | map(tonumber))')
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
             - uses: actions/setup-node@v7.1.0
               with:
-                  node-version: current
+                  node-version: ${{ steps.node.outputs.version }}
             - uses: pnpm/action-setup@v6.1.1
               with:
                   version: latest
@@ -60,6 +65,7 @@ jobs:
               run: pnpm install --frozen-lockfile
             - name: Verify toolchain
               run: |
+                  test "$(node --version)" = "v${{ steps.node.outputs.version }}"
                   node --version
                   pnpm --version
                   java -version

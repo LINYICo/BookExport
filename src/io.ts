@@ -40,3 +40,18 @@ export async function readBounded(response: Response, limit: number, signal: Abo
     }
     return buffer;
 }
+
+export function wait(ms: number, signal: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        signal.throwIfAborted();
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', cancel);
+            resolve();
+        }, ms);
+        function cancel() {
+            clearTimeout(timer);
+            reject(signal.reason);
+        }
+        signal.addEventListener('abort', cancel, { once: true });
+    });
+}

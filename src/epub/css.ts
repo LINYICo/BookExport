@@ -5,8 +5,8 @@ export type ResolveResource = (url: string, kind?: ResourceKind) => string | und
 export function rewriteCss(
     css: string,
     resolve: ResolveResource,
-    inline = false,
-    use?: (path: string) => void,
+    inline: boolean,
+    use: (path: string) => void,
 ) {
     const declarations = (style: CSSStyleDeclaration, font = false) => {
         for (const property of Array.from(style)) {
@@ -91,7 +91,7 @@ export function rewriteCss(
             style.removeProperty(property);
             if (!value || value.includes(missing)) continue;
             style.setProperty(property, value, priority);
-            if (use && mappedPaths.size)
+            if (mappedPaths.size)
                 for (const [, path] of style.getPropertyValue(property).matchAll(urlTokens))
                     if (path && mappedPaths.has(path)) use(path);
         }
