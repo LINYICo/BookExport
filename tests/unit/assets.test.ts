@@ -2,16 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createAssetQueue } from '../../src/assets.ts';
 import { readBounded } from '../../src/io.ts';
-import { httpsURL, resourceFormat, resourceURL, type ResourceResponse } from '../../src/resource.ts';
+import {
+    httpsURL,
+    resourceFormat,
+    resourceURL,
+    type ResourceResponse,
+} from '../../src/resource.ts';
 
 const base = 'https://assets.weread.qq.com/books/intro.xhtml';
 const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
 test('resourceFormat identifies images by their signatures', () => {
     assert.deepEqual(
-        resourceFormat(
-            new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1]),
-        ),
+        resourceFormat(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1])),
         { ext: '.png', mediaType: 'image/png' },
     );
     assert.deepEqual(resourceFormat(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1])), {
@@ -33,11 +36,7 @@ test('resourceFormat identifies images by their signatures', () => {
         { ext: '.webp', mediaType: 'image/webp' },
     );
     assert.equal(resourceFormat(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])), null);
-    assert.equal(
-        resourceFormat(new Uint8Array([0xff, 0xd8])),
-        null,
-        'truncated data is rejected',
-    );
+    assert.equal(resourceFormat(new Uint8Array([0xff, 0xd8])), null, 'truncated data is rejected');
 });
 
 test('resourceFormat identifies fonts by their signatures', () => {

@@ -206,8 +206,10 @@ export function createEbookExport({
 
             const parser = new DOMParser();
             function readBody(chapter: ChapterDocument) {
-                const body = parser.parseFromString(chapter.markup, 'application/xhtml+xml')
-                    .documentElement;
+                const body = parser.parseFromString(
+                    chapter.markup,
+                    'application/xhtml+xml',
+                ).documentElement;
                 if (body.localName !== 'body') throw new Error('Could not prepare chapter XHTML.');
                 return body;
             }

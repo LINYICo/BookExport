@@ -252,6 +252,20 @@ test('normalizeCatalog skips entries without a chapter UID and reports missing b
     assert.throws(() => normalizeCatalog({ data: [{ bookId: 'other' }] }, '42'), /catalog/);
 });
 
+test('normalizeCatalog validates fields and excludes untrusted metadata', () => {
+    const chapters = [
+        { chapterUid: 1, title: 'Valid', wordCount: '0', parentChapterUid: 2, href: 'a.xhtml' },
+        { chapterUid: '3', href: 42, parentChapterUid: {}, sections: [{ id: 2, title: 'Ignored' }] },
+        { chapterUid: 4, title: 42 },
+        { chapterUid: 5, wordCount: false },
+        { chapterUid: true },
+    ];
+    assert.deepEqual(normalizeCatalog({ bookId: '42', chapters }, '42'), [
+        { chapterUid: 1, title: 'Valid', wordCount: '0', parentChapterUid: '2', href: 'a.xhtml' },
+        { chapterUid: '3' },
+    ]);
+});
+
 test('chapter selection keeps image and front-matter leaves and preserves group ancestry', () => {
     const chapters = [
         { chapterUid: 20, title: 'Part One', wordCount: 0 },
