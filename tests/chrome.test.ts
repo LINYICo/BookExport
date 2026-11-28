@@ -208,15 +208,21 @@ try {
         "document.readyState === 'complete' && document.title.endsWith('\u5fae\u4fe1\u8bfb\u4e66')",
         sessionId,
     );
-    const { targetInfos } = await send<{
-        targetInfos: { type: string; url: string; targetId: string }[];
-    }>('Target.getTargets');
-    const workerTarget = targetInfos.find(
-        (target) => target.type === 'service_worker' && target.url.includes(extension),
-    );
-    assert.ok(workerTarget, 'extension action worker');
+    let workerTargetId: string | undefined;
+    for (let attempt = 0; attempt < 50 && !workerTargetId; attempt++) {
+        const { targetInfos } = await send<{
+            targetInfos: { type: string; url: string; targetId: string }[];
+        }>('Target.getTargets');
+        workerTargetId = targetInfos.find(
+            (target) =>
+                target.type === 'service_worker' &&
+                target.url.startsWith('chrome-extension://' + extension + '/'),
+        )?.targetId;
+        if (!workerTargetId) await delay(100);
+    }
+    assert.ok(workerTargetId, 'Extension service worker did not start');
     const { sessionId: worker } = await send<{ sessionId: string }>('Target.attachToTarget', {
-        targetId: workerTarget.targetId,
+        targetId: workerTargetId,
         flatten: true,
     });
     const mockedImages = await send<Evaluation>(
