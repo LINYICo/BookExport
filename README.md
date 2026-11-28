@@ -1,34 +1,42 @@
 # BookExport
 
-BookExport is a browser extension that downloads WeRead books as EPUB files. It uses your existing WeRead session and packages chapters, a table of contents, and available illustrations locally.
+BookExport downloads WeRead books as EPUB files with chapters, a table of contents, and available illustrations. It uses your signed-in WeRead session and packages files locally.
 
 ## Install
 
-1. Download the BookExport ZIP from GitHub Releases and extract it.
-2. Open the extensions page in Chrome 110 or later, or in a version of Dia with Manifest V3 support.
-3. Enable **Developer mode**, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
-
-When installing from a source checkout, select `chrome-extension/`.
+1. Download and extract the BookExport ZIP from [GitHub Releases](https://github.com/LINYICo/BookExport/releases).
+2. In the latest stable Chrome, open **Extensions**, enable **Developer mode**, and choose **Load unpacked**.
+3. Select the extracted folder containing `manifest.json`.
 
 ## Download a book
 
-1. Sign in to [WeRead](https://weread.qq.com/) and open a book you can read.
-2. Click **BookExport** in the browser toolbar, then click **Download EPUB**.
-3. Follow progress in the panel. You can close it and reopen it while the reader tab stays open.
-4. Find the EPUB in your browser's downloads. Use **Cancel download** to stop an export in progress.
+Sign in to WeRead, open a book, and click **BookExport** in the toolbar. Select **Download EPUB**. You can close the panel and reopen it to check progress or cancel. Keep the reader tab open until the EPUB is sent to the browser's downloads.
 
-BookExport supports EPUB-format books. TXT-format web novels are unsupported. If an illustration fails to download, the EPUB includes a placeholder. Export only books you have permission to save.
+BookExport supports EPUB-format books and keeps a placeholder for any unavailable image. Export only books you have permission to save.
 
 ## Development
 
-Use the latest Node.js LTS (minimum 24) and the latest pnpm. The extension loads directly from source and has no third-party npm dependencies.
+- **Latest stable** Chrome, Node.js Current, pnpm, OpenJDK GA, and EPUBCheck
+- **Latest** TypeScript, Rolldown, Oxlint, and Oxfmt
+- Native Manifest V3 and Web APIs, ESNext, and EPUB 3
 
 ```sh
+pnpm install
+pnpm dev
+pnpm build
+pnpm format
+pnpm format:check
+pnpm lint
+pnpm typecheck
 pnpm test
 pnpm test:chrome
+pnpm check
+pnpm release
 ```
 
-The Chrome smoke test uses a clean profile and a local WeRead fixture. Install Chrome and [EPUBCheck](https://www.w3.org/publishing/epubcheck/docs/installation/) to run it. Set `CHROME_BIN` or `EPUBCHECK_BIN` if either executable is installed at a custom path. GitHub Actions runs both test suites.
+Load `dist/extension/` to test the build. The Chrome test uses a temporary profile and synthetic reader responses, then validates the downloaded file with EPUBCheck. Set `CHROME_BIN` or `EPUBCHECK_BIN` to override their executable paths. Use [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) in an isolated stable Chrome profile for interactive debugging.
+
+Run `pnpm check` before publishing. Run `pnpm release` to create the installable ZIP under `dist/`. Update the package and manifest versions together and record changes in [RELEASE.md](RELEASE.md).
 
 ## License
 

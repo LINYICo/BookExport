@@ -1,5 +1,19 @@
 # Release history
 
+## v0.4.0 - 2026-11-28
+
+### Changed
+
+- Build strict TypeScript with Rolldown and a reproducible pnpm lockfile.
+- Use a native popover with system theme support and an accessible progress bar.
+- Transfer image bytes directly, deduplicate images across chapters, and bound concurrent downloads.
+- Package EPUBs as blobs with native compression and cancellation.
+
+### Tests
+
+- Check formatting, lint, and TypeScript in CI.
+- Verify the built extension and validate the downloaded EPUB in Chrome.
+
 ## v0.3.0 - 2026-11-28
 
 ### Fixed

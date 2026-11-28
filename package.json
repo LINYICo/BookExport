@@ -1,14 +1,27 @@
 {
-  "name": "bookexport",
-  "version": "0.3.0",
-  "private": true,
-  "license": "MIT",
-  "type": "module",
-  "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "test": "node --test tests/epub-export.test.js",
-    "test:chrome": "node tests/chrome-smoke.mjs"
-  }
+    "name": "bookexport",
+    "version": "0.4.0",
+    "private": true,
+    "license": "MIT",
+    "type": "module",
+    "scripts": {
+        "dev": "node scripts/build.ts --watch",
+        "build": "node scripts/build.ts --release",
+        "format": "oxfmt",
+        "format:check": "oxfmt --check",
+        "lint": "oxlint src tests scripts rolldown.config.ts",
+        "typecheck": "tsc --noEmit",
+        "test": "node --test tests/unit/*.test.ts",
+        "test:chrome": "node tests/chrome.test.ts",
+        "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:chrome",
+        "release": "pnpm build && node scripts/release.ts"
+    },
+    "devDependencies": {
+        "@types/chrome": "latest",
+        "@types/node": "latest",
+        "oxfmt": "latest",
+        "oxlint": "latest",
+        "rolldown": "latest",
+        "typescript": "latest"
+    }
 }

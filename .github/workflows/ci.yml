@@ -1,36 +1,57 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+    push:
+        branches: [main]
+    pull_request:
 
 permissions:
-  contents: read
+    contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-      - name: EPUB unit tests
-        run: node --test tests/epub-export.test.js
-      - name: Install EPUBCheck
-        run: |
-          cd "$RUNNER_TEMP"
-          curl --fail --silent --show-error --location --retry 3 \
-            https://github.com/w3c/epubcheck/releases/download/v5.4.0/epubcheck-5.4.0.zip -o epubcheck.zip
-          echo '33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c  epubcheck.zip' | sha256sum --check
-          unzip -q epubcheck.zip
-          cat > epubcheck <<'EOF'
-          #!/usr/bin/env bash
-          exec java -jar "$RUNNER_TEMP/epubcheck-5.4.0/epubcheck.jar" "$@"
-          EOF
-          chmod +x epubcheck
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - name: Chrome download smoke test
-        run: CHROME_BIN="$(command -v google-chrome)" node tests/chrome-smoke.mjs
+    test:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v7.0.1
+            - uses: actions/setup-node@v7.1.0
+              with:
+                  node-version: current
+            - uses: pnpm/action-setup@v6.1.1
+              with:
+                  version: latest
+            - uses: actions/setup-java@v6.3.0
+              with:
+                  distribution: temurin
+                  java-version: '27'
+                  check-latest: true
+            - name: Update Chrome Stable
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y google-chrome-stable
+                  google-chrome --version
+            - name: Install EPUBCheck
+              run: |
+                  cd "$RUNNER_TEMP"
+                  curl --fail --silent --show-error --location --retry 3 \
+                    https://github.com/w3c/epubcheck/releases/download/v5.4.0/epubcheck-5.4.0.zip -o epubcheck.zip
+                  echo '33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c  epubcheck.zip' | sha256sum --check
+                  unzip -q epubcheck.zip
+                  cat > epubcheck <<'SH'
+                  #!/usr/bin/env bash
+                  exec java -jar "$RUNNER_TEMP/epubcheck-5.4.0/epubcheck.jar" "$@"
+                  SH
+                  chmod +x epubcheck
+                  echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+            - name: Install locked dependencies
+              run: pnpm install --frozen-lockfile
+            - name: Verify toolchain
+              run: |
+                  node --version
+                  pnpm --version
+                  java -version
+                  epubcheck --version
+            - name: Check source and download an EPUB
+              run: pnpm check
+            - name: Verify release ZIP
+              run: node scripts/release.ts

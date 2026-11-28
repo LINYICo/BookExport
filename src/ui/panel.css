@@ -1,0 +1,211 @@
+main {
+    color-scheme: light dark;
+    --muted: light-dark(#5e6879, #b9c4d5);
+    --line: light-dark(#eaedf2, #344053);
+    --blue: light-dark(#1763d4, #2b70dc);
+    position: fixed;
+    inset: 12px 12px auto auto;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 15px;
+    box-shadow: 0 8px 30px #17203330;
+    width: min(324px, calc(100vw - 26px));
+    max-height: calc(100vh - 26px);
+    overflow: auto;
+    font:
+        14px/1.45 system-ui,
+        sans-serif;
+    color: light-dark(#172033, #e9eff9);
+    background: light-dark(#fff, #202938);
+}
+[hidden] {
+    display: none;
+}
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px 9px 16px;
+    border-bottom: 1px solid var(--line);
+}
+h1,
+p {
+    margin: 0;
+}
+.product {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 650;
+}
+h1 {
+    font-size: 14px;
+    line-height: 1.45;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+button {
+    font: inherit;
+    cursor: pointer;
+}
+button:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+}
+.close {
+    position: relative;
+    display: grid;
+    place-items: center;
+    flex: 0 0 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: #485369;
+}
+.close::before {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    border-radius: inherit;
+    background: #e9edf3;
+}
+.close::after {
+    content: '';
+    position: relative;
+    width: 10px;
+    height: 10px;
+    background:
+        linear-gradient(45deg, transparent 44%, currentColor 44% 56%, transparent 56%),
+        linear-gradient(-45deg, transparent 44%, currentColor 44% 56%, transparent 56%);
+}
+.close:hover::before {
+    background: #dbe2ec;
+}
+
+.download {
+    display: grid;
+    gap: 12px;
+    padding: 14px 16px 16px;
+}
+.preview {
+    display: grid;
+    place-items: center;
+    min-height: 112px;
+    border: 1px solid light-dark(#f3e7ca, #5b4d33);
+    border-radius: 12px;
+    background: radial-gradient(
+        ellipse at 50% 35%,
+        light-dark(#fff9e9, #493c27),
+        light-dark(#f8ebcc, #3e3324)
+    );
+}
+.ebook {
+    position: relative;
+    box-sizing: border-box;
+    width: 61px;
+    height: 76px;
+    padding: 16px 9px;
+    border: 1px solid #d8e1f2;
+    border-left: 5px solid #4372b3;
+    border-radius: 5px 9px 9px 5px;
+    background: #f8fbff;
+    color: #2e5084;
+    box-shadow:
+        0 5px 0 -2px #d5dee9,
+        0 9px 15px #67502d22;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0.045em;
+}
+.ebook::after {
+    content: '';
+    position: absolute;
+    right: 10px;
+    bottom: 15px;
+    left: 9px;
+    height: 13px;
+    border-top: 2px solid #d7e0ed;
+    border-bottom: 2px solid #d7e0ed;
+    box-sizing: border-box;
+}
+
+#status {
+    color: var(--muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+#status:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+}
+.progress {
+    appearance: none;
+    width: 100%;
+    height: 7px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 99px;
+    background: light-dark(#e9eff9, #344053);
+}
+.progress::-webkit-progress-bar {
+    background: transparent;
+}
+.progress::-webkit-progress-value {
+    border-radius: inherit;
+    background: linear-gradient(90deg, #247afa, #45a6fa);
+    transition: width 420ms cubic-bezier(0.2, 0.7, 0.25, 1);
+}
+.progress:indeterminate {
+    background: linear-gradient(90deg, transparent, #428df5, transparent) 0 0 / 40% 100% no-repeat
+        light-dark(#e9eff9, #344053);
+    animation: sweep 1.45s ease-in-out infinite alternate;
+}
+@keyframes sweep {
+    to {
+        background-position: 100% 0;
+    }
+}
+
+.download-button {
+    display: grid;
+    place-items: center;
+    min-height: 40px;
+    padding: 0 13px;
+    border: 1px solid #1460d1;
+    border-radius: 9px;
+    background: var(--blue);
+    color: white;
+    font-size: 14px;
+    font-weight: 650;
+}
+.download-button:hover:not(:disabled) {
+    background: #1157bd;
+}
+.download-button[data-running] {
+    border-color: #d9e4f5;
+    background: #f0f5ff;
+    color: #244a85;
+}
+.download-button[data-running]:hover:not(:disabled) {
+    background: #e6efff;
+}
+.download-button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .progress::-webkit-progress-value {
+        transition: none;
+    }
+    .progress:indeterminate {
+        animation: none;
+        background-position: center;
+    }
+}

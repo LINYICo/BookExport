@@ -1,7 +1,11 @@
 # BookExport
 
-BookExport is an EPUB export extension for WeRead. Use English for interface text, commit messages, comments, tests, and project documentation. Write commit messages in the form `type: description`.
+BookExport is a Manifest V3 extension that exports EPUB books from WeRead. Use English for UI text, comments, tests, documentation, and commit messages. Write commits as `type: description`.
 
-Load `chrome-extension/` directly in a browser that supports Manifest V3. The toolbar action opens a download panel in the reader tab. The reader entry point, `content.js`, uses `chrome.runtime.getURL` to load `lib/epub-export.js` dynamically. The export module receives browser dependencies through a factory. Its pure functions can run in Node.js. The service worker in `background.js` downloads cross-origin images. When changing image sources, check that the manifest's host permissions cover the CDN redirect chain.
+- `src/background.ts` handles the toolbar action and cross-origin images.
+- `src/content.ts` owns the reader tab and panel lifecycle. `src/export.ts` owns each download.
+- `src/weread/` contains the WeRead client and protocol. Preserve the reference vectors and signed request behavior.
+- `src/epub/` handles XHTML, metadata, and ZIP packaging. `src/ui/` contains the native download panel.
+- `public/` holds the manifest and icons. Rolldown assembles the installable extension in `dist/extension/`.
 
-Follow the coding guidelines in `CLEAN-CODE.md`. Run the EPUB export tests with `pnpm test`.
+Use the latest stable Node.js, pnpm, and Chromium. Keep strict TypeScript and zero third-party runtime dependencies. Check CDN host permissions when changing image sources. Follow [CLEAN-CODE.md](CLEAN-CODE.md) and run `pnpm check` before publishing.
