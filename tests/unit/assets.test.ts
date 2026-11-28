@@ -266,10 +266,8 @@ test('budget recovery reclaims dependencies after a failed retry', async (t) => 
         () => 0,
         { budget: 40, maxResource: 12 },
     );
-    await queue.add(
-        ['orphan.png', 'dependent.png', 'kept.png', 'broken.png', 'needed.png'],
-        base,
-    );
+    const urls = ['orphan.png', 'dependent.png', 'kept.png', 'broken.png', 'needed.png'];
+    await queue.add(urls, base);
     await queue.drain();
 
     let scans = 0;
