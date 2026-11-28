@@ -3,6 +3,9 @@ import { ByteLimitError, readBounded } from './io.ts';
 export const resourceLimit = 16 * 1024 * 1024;
 const approvedHosts = ['weread.qq.com', 'tencent-cloud.com', 'myqcloud.com'];
 
+export type ResourceKind = 'image' | 'font';
+export type ResourceReference = { value: string; kind?: ResourceKind | undefined };
+
 export type ResourceFailure =
     | 'unavailable'
     | 'timeout'

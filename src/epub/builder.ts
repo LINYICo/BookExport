@@ -17,45 +17,71 @@ export interface EpubChapter {
     attributes?: Record<string, string>;
     hasHeading?: boolean;
     parent?: number;
+    sections?: readonly { id: number; title: string }[];
 }
 
 function chapterTree(chapters: EpubChapter[]) {
     interface Node {
-        index: number;
-        chapter: EpubChapter;
+        index?: number;
+        section?: number;
+        title: string;
         children: Node[];
     }
     const roots: Node[] = [];
-    let maxDepth = 1;
     const ancestors: Node[] = [];
+    let maxDepth = 1;
     for (const [index, chapter] of chapters.entries()) {
         const depth = ancestors.findLastIndex((node) => node.index === chapter.parent);
         ancestors.length = depth + 1;
-        const node = { index, chapter, children: [] };
-        (ancestors.at(-1)?.children ?? roots).push(node);
+        let siblings = ancestors.at(-1)?.children ?? roots;
+        // Group headings remain in the EPUB 3 navigation without pointing at imaginary content.
+        for (const { id, title } of chapter.sections?.slice(0, 64 - ancestors.length) ?? []) {
+            let section = siblings.at(-1);
+            if (section?.section !== id) {
+                section = { section: id, title, children: [] };
+                siblings.push(section);
+            }
+            siblings = section.children;
+        }
+        const node = { index, title: chapter.title, children: [] };
+        siblings.push(node);
         maxDepth = Math.max(maxDepth, ancestors.length + 1);
-        // Ignore inconsistent or excessively deep nesting without reordering the spine.
         if (ancestors.length < 64) ancestors.push(node);
     }
     function nav(nodes: Node[]): string {
         return (
             '<ol>' +
             nodes
-                .map(
-                    ({ index, chapter, children }) =>
-                        `<li><a href="${chapterFileName(index + 1)}">${escapeXml(chapter.title)}</a>${children.length ? nav(children) : ''}</li>`,
-                )
+                .map(({ index, title, children }) => {
+                    const label = escapeXml(title);
+                    const destination =
+                        index === undefined
+                            ? '<span>' + label + '</span>'
+                            : '<a href="' + chapterFileName(index + 1) + '">' + label + '</a>';
+                    return '<li>' + destination + (children.length ? nav(children) : '') + '</li>';
+                })
                 .join('\n') +
             '</ol>'
         );
     }
     function ncx(nodes: Node[]): string {
         return nodes
-            .map(
-                ({ index, chapter, children }) =>
-                    `<navPoint id="navPoint-${index + 1}" playOrder="${index + 1}">
-<navLabel><text>${escapeXml(chapter.title)}</text></navLabel>
-<content src="${chapterFileName(index + 1)}"/>${ncx(children)}</navPoint>`,
+            .map(({ index, title, children }) =>
+                index === undefined
+                    ? ncx(children)
+                    : '<navPoint id="navPoint-' +
+                      (index + 1) +
+                      '" playOrder="' +
+                      (index + 1) +
+                      '">' +
+                      '<navLabel><text>' +
+                      escapeXml(title) +
+                      '</text></navLabel>' +
+                      '<content src="' +
+                      chapterFileName(index + 1) +
+                      '"/>' +
+                      ncx(children) +
+                      '</navPoint>',
             )
             .join('\n');
     }

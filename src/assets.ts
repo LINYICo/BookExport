@@ -1,6 +1,13 @@
 import { type EpubImage } from './epub/builder.ts';
 import { imageExtensionAndType } from './epub/document.ts';
-import { resourceLimit, resourceURL, type FetchAsset, type ResourceFailure } from './resource.ts';
+import {
+    resourceLimit,
+    resourceURL,
+    type FetchAsset,
+    type ResourceFailure,
+    type ResourceKind,
+    type ResourceReference,
+} from './resource.ts';
 import { wait } from './weread/client.ts';
 
 const defaultBudget = 128 * 1024 * 1024;
@@ -17,7 +24,17 @@ function resourceFormat(bytes: Uint8Array) {
         return { ext: '.ttf', mediaType: 'font/ttf' };
 }
 
-type Job = { url: string; index: number; asset?: EpubImage };
+type Job = {
+    url: string;
+    index: number;
+    references: Map<ResourceKind | undefined, number>;
+    status?: ResourceFailure | 'downloaded';
+    asset?: EpubImage;
+};
+
+function matchesKind(mediaType: string, kind?: ResourceKind) {
+    return !kind || mediaType.startsWith(kind + '/');
+}
 
 export function createAssetQueue(
     fetchAsset: FetchAsset,
@@ -28,17 +45,15 @@ export function createAssetQueue(
     const jobs = new Map<string, Job>();
     const pending: Job[] = [];
     const active = new Set<Promise<void>>();
-    const failures = new Map<ResourceFailure, number>();
+    const rejected = new Map<string, number>();
+    let omitted = 0;
+    let downloaded = 0;
     let retained = 0;
     let reserved = 0;
     let references = 0;
     let draining = false;
     const noMoreRequests = new AbortController();
     const pacing = AbortSignal.any([signal, noMoreRequests.signal]);
-
-    function fail(status: ResourceFailure) {
-        if (status !== 'cancelled') failures.set(status, (failures.get(status) ?? 0) + 1);
-    }
 
     function pump() {
         if (signal.aborted) return;
@@ -49,7 +64,7 @@ export function createAssetQueue(
             const job = pending.shift();
             if (!job) return;
             if (limit <= 0) {
-                fail('limit');
+                job.status = 'limit';
                 continue;
             }
             // Allow both the response chunks and the outgoing contiguous buffer in the budget.
@@ -68,12 +83,20 @@ export function createAssetQueue(
         try {
             const result = await fetchAsset(job.url, limit, signal);
             signal.throwIfAborted();
-            if (result.status !== 'downloaded') fail(result.status);
-            else if (result.data.length > limit) fail('limit');
+            if (result.status !== 'downloaded') job.status = result.status;
+            else if (result.data.length > limit) job.status = 'limit';
             else {
+                downloaded++;
                 const kind = resourceFormat(result.data);
-                if (!kind) fail('unsupported');
+                if (
+                    !kind ||
+                    ![...job.references.keys()].some((expected) =>
+                        matchesKind(kind.mediaType, expected),
+                    )
+                )
+                    job.status = 'unsupported';
                 else {
+                    job.status = 'downloaded';
                     retained += result.data.length;
                     job.asset = {
                         href: 'images/image_' + job.index + kind.ext,
@@ -83,29 +106,42 @@ export function createAssetQueue(
                 }
             }
         } catch {
-            if (!signal.aborted) fail('unavailable');
+            job.status = signal.aborted ? 'cancelled' : 'unavailable';
         } finally {
             reserved -= reservation;
         }
         if (!pacing.aborted) await wait(imageDelayMs(), pacing).catch(() => {});
     }
 
-    async function add(values: Iterable<string>, base: string) {
+    async function add(values: Iterable<string | ResourceReference>, base: string) {
         if (draining) throw new Error('The resource queue is closed.');
-        for (const value of values) {
+        for (const entry of values) {
             signal.throwIfAborted();
             references++;
-            const url = resourceURL(value, base);
-            if (!url) {
-                fail('policy');
+            const { value, kind } =
+                typeof entry === 'string' ? { value: entry, kind: undefined } : entry;
+            if (!value.trim()) {
+                omitted++;
                 continue;
             }
-            if (jobs.has(url)) continue;
+            const url = resourceURL(value, base);
+            if (!url) {
+                const key = URL.parse(value, base);
+                if (key) key.hash = '';
+                const identity = key?.href ?? value;
+                rejected.set(identity, (rejected.get(identity) ?? 0) + 1);
+                continue;
+            }
+            const existing = jobs.get(url);
+            if (existing) {
+                existing.references.set(kind, (existing.references.get(kind) ?? 0) + 1);
+                continue;
+            }
             while (pending.length >= maxPending && active.size) {
                 await Promise.race(active);
                 signal.throwIfAborted();
             }
-            const job = { url, index: jobs.size + 1 };
+            const job = { url, index: jobs.size + 1, references: new Map([[kind, 1]]) };
             jobs.set(url, job);
             pending.push(job);
             pump();
@@ -119,26 +155,52 @@ export function createAssetQueue(
         if (signal.aborted) pending.length = 0;
     }
 
-    function path(value: string, base: string, imageOnly = false) {
+    function path(value: string, base: string, kind?: ResourceKind) {
         const url = resourceURL(value, base);
         const asset = url ? jobs.get(url)?.asset : undefined;
-        if (asset && (!imageOnly || asset.mediaType.startsWith('image/')))
-            return '../' + asset.href;
-        if (imageOnly && asset) fail('unsupported');
+        if (asset && matchesKind(asset.mediaType, kind)) return '../' + asset.href;
     }
 
     function result(usedPaths?: ReadonlySet<string>) {
-        const assets = Array.from(jobs.values()).flatMap(({ asset }) =>
-            asset && (!usedPaths || usedPaths.has('../' + asset.href)) ? [asset] : [],
-        );
+        const assets: EpubImage[] = [];
+        const failures = new Map<ResourceFailure, number>();
+        if (rejected.size) failures.set('policy', rejected.size);
+        let missingReferences = omitted;
+        for (const count of rejected.values()) missingReferences += count;
+        for (const job of jobs.values()) {
+            const { asset, status } = job;
+            if (status === 'cancelled') continue;
+            const used = asset && (!usedPaths || usedPaths.has('../' + asset.href));
+            if (used) assets.push(asset);
+            let mismatch = false;
+            for (const [kind, count] of job.references) {
+                const compatible = asset && matchesKind(asset.mediaType, kind);
+                if (!used || !compatible) missingReferences += count;
+                if (asset && !compatible) mismatch = true;
+            }
+            const failure =
+                status === 'downloaded' ? (mismatch ? 'unsupported' : undefined) : status;
+            if (failure) failures.set(failure, (failures.get(failure) ?? 0) + 1);
+        }
         return {
             assets,
             references,
-            unique: jobs.size,
+            unique: jobs.size + rejected.size,
+            downloaded,
+            omitted,
+            missingReferences,
             failures: Object.fromEntries(failures),
             unavailable: Array.from(failures.values()).reduce((sum, count) => sum + count, 0),
         };
     }
 
-    return { add, drain, path, result };
+    function discardUnused(usedPaths: ReadonlySet<string>) {
+        for (const job of jobs.values())
+            if (job.asset && !usedPaths.has('../' + job.asset.href)) {
+                retained -= job.asset.data.length;
+                delete job.asset;
+            }
+    }
+
+    return { add, drain, path, result, discardUnused };
 }

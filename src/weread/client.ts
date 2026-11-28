@@ -8,7 +8,10 @@ export interface Chapter {
     wordCount?: number | string;
     href?: string;
     parentChapterUid?: string;
+    sections?: { id: number; title: string }[];
 }
+export class ExportError extends Error {}
+
 export interface Book {
     bookId: string;
     title: string;
@@ -26,14 +29,12 @@ function record(value: unknown): Record<string, unknown> {
 export function extractInitialState(html: string): unknown {
     const json = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;\s*\(function/)?.[1];
     if (!json)
-        throw new Error(
-            'Could not find __INITIAL_STATE__ in the reader HTML. The page layout may have changed.',
-        );
+        throw new ExportError('WeRead did not provide book details. Refresh the reader and retry.');
     try {
         return JSON.parse(json);
     } catch {
-        throw new Error(
-            'Could not parse __INITIAL_STATE__. Refresh the reader page and try again.',
+        throw new ExportError(
+            'WeRead returned invalid book details. Refresh the reader and retry.',
         );
     }
 }
@@ -42,8 +43,7 @@ export function parseReaderState(state: unknown): Book {
     const reader = record(record(state).reader);
     const info = record(reader.bookInfo);
     const bookId = String(info.bookId || '');
-    if (!bookId)
-        throw new Error('Missing reader.bookInfo.bookId. Open a book in the WeRead reader.');
+    if (!bookId) throw new ExportError('Open a book in the WeRead reader and retry.');
     const language = languageTag(info.language ?? info.lang);
     return {
         bookId,
@@ -68,7 +68,7 @@ function isChapter(value: unknown): value is Omit<Chapter, 'href' | 'parentChapt
 
 export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
     if (!payload || typeof payload !== 'object')
-        throw new Error('Unexpected chapterInfos response format');
+        throw new ExportError('Unexpected chapterInfos response format');
     const data = record(payload);
     const candidates: unknown[] = Array.isArray(payload)
         ? payload
@@ -81,7 +81,8 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
         const item = record(candidate);
         if (String(item.bookId || record(item.book).bookId || '') !== bookId) continue;
         const chapters = item.updated ?? item.chapterInfos ?? item.chapters ?? [];
-        if (!Array.isArray(chapters)) throw new Error('Unexpected chapterInfos response format');
+        if (!Array.isArray(chapters))
+            throw new ExportError('Unexpected chapterInfos response format');
         return chapters.filter(isChapter).map(({ chapterUid, title, wordCount, ...source }) => {
             const { href, parentChapterUid } = record(source);
             return {
@@ -95,11 +96,62 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
             };
         });
     }
-    throw new Error('No catalog found for book ID ' + bookId);
+    throw new ExportError(
+        'WeRead did not return a catalog. Sign in and check that you can read this book, then retry.',
+    );
+}
+
+function chapterId(value: string | number | undefined) {
+    const raw = String(value ?? '').trim();
+    const id = Number(raw);
+    return /^\d+$/.test(raw) && Number.isSafeInteger(id) && id > 0 ? id : undefined;
 }
 
 export function selectExportableChapters(chapters: Chapter[]) {
-    return chapters.filter((ch) => Number(ch.wordCount || 0) > 0 && ch.title !== '\u5c01\u9762');
+    const entries = new Map<number, Chapter>();
+    for (const chapter of chapters) {
+        const id = chapterId(chapter.chapterUid);
+        if (id !== undefined && !entries.has(id) && chapter.title?.trim() !== '\u5c01\u9762')
+            entries.set(id, chapter);
+    }
+    const parents = new Set(
+        Array.from(entries.values(), ({ parentChapterUid }) => chapterId(parentChapterUid)),
+    );
+    const sections = new Set(
+        [...entries]
+            .filter(
+                ([id, chapter]) =>
+                    parents.has(id) && !chapter.href?.trim() && !(Number(chapter.wordCount) > 0),
+            )
+            .map(([id]) => id),
+    );
+    const result: Chapter[] = [];
+    for (const [id, chapter] of entries) {
+        if (sections.has(id)) continue;
+        const path: NonNullable<Chapter['sections']> = [];
+        const visited = new Set([id]);
+        let parent = chapterId(chapter.parentChapterUid);
+        while (
+            parent !== undefined &&
+            sections.has(parent) &&
+            !visited.has(parent) &&
+            visited.size < 64
+        ) {
+            visited.add(parent);
+            const section = entries.get(parent);
+            if (section?.title?.trim()) path.unshift({ id: parent, title: section.title });
+            parent = chapterId(section?.parentChapterUid);
+        }
+        const { parentChapterUid: _parent, ...rest } = chapter;
+        result.push({
+            ...rest,
+            ...(parent !== undefined && !visited.has(parent) && entries.has(parent)
+                ? { parentChapterUid: String(parent) }
+                : {}),
+            ...(path.length ? { sections: path } : {}),
+        });
+    }
+    return result;
 }
 
 export function wait(ms: number, signal: AbortSignal) {
@@ -144,11 +196,16 @@ export function createWeReadClient(
             const response = await fetch(url, options);
             if (!response.ok) {
                 void response.body?.cancel().catch(() => {});
-                if (response.status === 401 || response.status === 403)
-                    throw new Error(
-                        'WeRead denied this request. Check your sign-in and access to this book.',
+                if (response.status === 401)
+                    throw new ExportError(
+                        'Your WeRead session expired. Sign in again, then retry.',
                     );
-                throw new Error('WeRead request failed with HTTP ' + response.status + '.');
+                if (response.status === 403)
+                    throw new ExportError(
+                        'WeRead denied access. Check that you can read this book.',
+                    );
+
+                throw new ExportError('WeRead request failed with HTTP ' + response.status + '.');
             }
             return new TextDecoder().decode(
                 await readBounded(response, 16 * 1024 * 1024, requestSignal),
@@ -156,12 +213,13 @@ export function createWeReadClient(
         } catch (error) {
             signal.throwIfAborted();
             if (error instanceof ByteLimitError)
-                throw new Error('The WeRead response exceeded the size limit.');
+                throw new ExportError('The WeRead response exceeded the size limit.');
             if (deadline.aborted)
-                throw new Error(
+                throw new ExportError(
                     'WeRead did not respond in time. Choose Retry download to try again.',
                 );
-            throw error;
+            if (error instanceof ExportError) throw error;
+            throw new ExportError('Could not reach WeRead. Check your connection and retry.');
         }
     }
 
@@ -176,7 +234,7 @@ export function createWeReadClient(
                 /* Report the raw response. */
             }
             if (code === '-2012') throw new ShardError('Session expired (-2012)', 'auth');
-            throw new Error(
+            throw new ExportError(
                 'WeRead rejected the chapter request' +
                     (/^-?\d+$/.test(code) ? ' (' + code + ')' : '') +
                     '.',
@@ -204,8 +262,10 @@ export function createWeReadClient(
             }
         }
         if (failure?.kind === 'auth')
-            throw new Error(path + ' ' + failure.message + '. Refresh the page and sign in again.');
-        throw new Error(
+            throw new ExportError(
+                path + ' ' + failure.message + '. Refresh the page and sign in again.',
+            );
+        throw new ExportError(
             path +
                 ' returned an empty response after ' +
                 retryDelays.length +
@@ -234,7 +294,7 @@ export function createWeReadClient(
             try {
                 payload = JSON.parse(text);
             } catch {
-                throw new Error(
+                throw new ExportError(
                     'Could not parse the chapterInfos response. Refresh the reader page and try again.',
                 );
             }
@@ -243,12 +303,16 @@ export function createWeReadClient(
         async chapter(book: Book, chapter: Chapter) {
             const first = await chapterShard('/web/book/chapter/e_0', params(book, chapter));
             if (first.startsWith('{') && first.includes('"bookId"'))
-                throw new Error('Export is unavailable for TXT-format web novels.');
+                throw new ExportError('Export is unavailable for TXT-format web novels.');
             await wait(shardDelay(), signal);
             const second = await chapterShard('/web/book/chapter/e_1', params(book, chapter));
             await wait(shardDelay(), signal);
             const last = await chapterShard('/web/book/chapter/e_3', params(book, chapter));
-            return decodeContentShards(first, second, last);
+            try {
+                return decodeContentShards(first, second, last);
+            } catch {
+                throw new ExportError('WeRead returned invalid chapter data. Retry the download.');
+            }
         },
         async css(book: Book, chapter: Chapter) {
             try {

@@ -235,6 +235,11 @@ main[data-stage='completed'] {
     color: var(--success);
     font-weight: 650;
 }
+main[data-stage='failed'] #status {
+    color: light-dark(#a02534, #ffa6ae);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
 .resource-warning {
     color: var(--muted);
     font-size: 12px;

@@ -1,3 +1,4 @@
+import { rewriteCss } from './epub/css.ts';
 import { createAssetQueue } from './assets.ts';
 import { buildEpub, sanitizeFilename, type EpubChapter } from './epub/builder.ts';
 import {
@@ -5,11 +6,10 @@ import {
     chapterResources,
     parseChapter,
     rewriteChapterLinks,
-    rewriteCss,
     type ChapterDocument,
 } from './epub/document.ts';
-import { type FetchAsset } from './resource.ts';
-import { createWeReadClient, wait } from './weread/client.ts';
+import { type FetchAsset, type ResourceReference } from './resource.ts';
+import { createWeReadClient, ExportError, wait } from './weread/client.ts';
 
 type Stage =
     | 'idle'
@@ -95,7 +95,6 @@ export function createEbookExport({
         const queue = createAssetQueue(fetchAsset, signal, imageDelayMs, {
             concurrency: imageConcurrency,
         });
-        let where = '';
         let result: State;
         done = 0;
         total = 0;
@@ -104,9 +103,9 @@ export function createEbookExport({
         try {
             const book = await client.reader(readerUrl);
             if (!book.psvts)
-                throw new Error('Missing psvts token. Refresh the reader page and try again.');
+                throw new ExportError('Sign in to WeRead, refresh the reader page, and retry.');
             const catalog = await client.catalog(book.bookId);
-            if (!catalog.length) throw new Error('No chapters are available to export.');
+            if (!catalog.length) throw new ExportError('No chapters are available to export.');
             const chapters: ChapterDocument[] = [];
             let serializer: XMLSerializer | undefined;
             const parentIndices = new Map<string, number>();
@@ -126,19 +125,18 @@ export function createEbookExport({
                         signal.throwIfAborted();
                     }
                 }
-                where = chapter.title ? '"' + chapter.title + '": ' : '';
                 const source = await client.chapter(book, chapter);
                 serializer ??= new XMLSerializer();
                 const { body, ...parsed } = parseChapter(source, readerUrl, chapter.href);
-                const references: string[] = [];
-                chapterResources(body, parsed.embeddedCss, (value) => {
-                    references.push(value);
+                const references: ResourceReference[] = [];
+                chapterResources(body, parsed.embeddedCss, (value, kind) => {
+                    references.push({ value, kind });
                     return value;
                 });
                 const markup = serializer.serializeToString(body);
                 retainedText += (markup.length + parsed.embeddedCss.length) * 2;
                 if (retainedText > 96 * 1024 * 1024)
-                    throw new Error('The book text exceeds the export size limit.');
+                    throw new ExportError('The book text exceeds the export size limit.');
                 chapters.push({
                     ...parsed,
                     title: chapter.title || String(chapter.chapterUid),
@@ -148,16 +146,16 @@ export function createEbookExport({
                         ...Array.from(body.querySelectorAll('[id]'), (node) => node.id),
                     ]),
                 });
-                parentIndices.set(String(chapter.chapterUid), done);
+                parentIndices.set(String(Number(chapter.chapterUid)), done);
                 done = chapters.length;
                 onStateChange();
                 await queue.add(references, parsed.base);
                 if (!css) {
                     css = await client.css(book, chapter);
                     cssBase = parsed.base;
-                    const styles: string[] = [];
-                    rewriteCss(css, (value) => {
-                        styles.push(value);
+                    const styles: ResourceReference[] = [];
+                    rewriteCss(css, (value, kind) => {
+                        styles.push({ value, kind });
                         return value;
                     });
                     await queue.add(styles, cssBase);
@@ -166,7 +164,6 @@ export function createEbookExport({
 
             await scheduler.yield();
             signal.throwIfAborted();
-            where = '';
             update({ stage: 'images', message: 'Finishing resource downloads…' });
             await queue.drain();
             signal.throwIfAborted();
@@ -188,7 +185,7 @@ export function createEbookExport({
                 const embeddedCss = chapterResources(
                     body,
                     chapter.embeddedCss,
-                    (value, imageOnly) => queue.path(value, chapter.base, imageOnly),
+                    (value, kind) => queue.path(value, chapter.base, kind),
                     use,
                 );
                 rewriteChapterLinks(body, index, chapters, documents);
@@ -211,16 +208,27 @@ export function createEbookExport({
                     hasHeading,
                     ...(chapter.language ? { language: chapter.language } : {}),
                     ...(parent !== undefined && parent < index ? { parent } : {}),
+                    ...(catalog[index]?.sections ? { sections: catalog[index].sections } : {}),
                 });
                 chapter.markup = '';
                 if (index % 16 === 0) await scheduler.yield();
             }
-            css = rewriteCss(css, (value) => queue.path(value, cssBase), false, use);
-            const { assets, unavailable } = queue.result(usedPaths);
+            css = rewriteCss(css, (value, kind) => queue.path(value, cssBase, kind), false, use);
+            const { assets, unavailable, omitted } = queue.result(usedPaths);
+            queue.discardUnused(usedPaths);
+            const chapterLanguages = new Set(
+                chapters.map(({ language }) => language).filter(Boolean),
+            );
+            const language =
+                book.language ??
+                (chapterLanguages.size === 1 && chapters.every(({ language }) => language)
+                    ? [...chapterLanguages][0]
+                    : undefined) ??
+                'und';
             const archive = await buildEpub({
                 title: book.title,
                 author: book.author,
-                language: book.language ?? 'und',
+                language,
                 css,
                 signal,
                 assets,
@@ -239,7 +247,12 @@ export function createEbookExport({
                 anchor.remove();
                 setTimeout(() => URL.revokeObjectURL(url), 10000);
             }
-            const warning = unavailable ? unavailable + ' resources unavailable.' : '';
+            const warning = [
+                unavailable ? unavailable + ' resources unavailable.' : '',
+                omitted ? 'Some unsupported resource references were removed.' : '',
+            ]
+                .filter(Boolean)
+                .join(' ');
             result = {
                 stage: 'completed',
                 warning,
@@ -257,9 +270,11 @@ export function createEbookExport({
                 : {
                       stage: 'failed',
                       message:
-                          'Export failed: ' +
-                          where +
-                          (error instanceof Error ? error.message : String(error)),
+                          error instanceof ExportError
+                              ? error.message
+                              : state.stage === 'packaging'
+                                ? 'Could not package the EPUB. Retry the download.'
+                                : 'Could not prepare this book for export. Refresh the reader and retry.',
                   };
         } finally {
             job.abort();

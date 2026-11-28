@@ -18,6 +18,7 @@ await mkdir(downloadPath);
 const benchmark = process.argv.includes('--benchmark');
 const stress = process.argv.includes('--stress');
 const metricsRun = benchmark || stress;
+const parallel = benchmark && process.argv.includes('--parallel');
 const network = await resourceServer(workspace, stress);
 const executable =
     process.env.CHROME_BIN ||
@@ -214,12 +215,27 @@ try {
         )
         .replace(
             'Next chapter</a>',
-            'Next chapter</a> <a href="#missing-image">See illustration</a> <a href="second.xhtml#missing-image">See next illustration</a>',
+            'Next chapter</a> <a href="#missing-image">See illustration</a> <a href="first.xhtml#missing-second-image">See next illustration</a>',
+        )
+        .replace('second.xhtml#chapter-start', 'first.xhtml#second-content')
+        .replace(
+            '</head>',
+            '<link rel="stylesheet" href="https://denied.invalid/xhtml-parser.css"/></head>',
         );
     const fixtureHtml =
         '<!doctype html>' +
         fixtureXhtml
             .replace('lang="en-US"', 'lang="fr"')
+            .replace('id="chapter-start"', 'id="second-content"')
+            .replaceAll('missing-image', 'missing-second-image')
+            .replace(
+                '<p id="second-content">A chapter for the browser download test.</p>',
+                '<p id="second-content">A chapter for the browser download test.</p>',
+            )
+            .replace(
+                '</head>',
+                '<base href="https://assets.weread.qq.com/book-source/chapter/"></head>',
+            )
             .replace('class="original-layout"', 'class="html-layout" id="html-start"')
             .replace(
                 'A chapter for the browser download test.',
@@ -232,9 +248,14 @@ try {
     const stylesheet =
         decodeStyleShard(CSS_SHARD) +
         ' .responsive { background-image: image-set("../illustrations/responsive.png" 1x, url("../illustrations/missing.png") 2x); }' +
-        ' .unused { background-image: url("../illustrations/orphan.png"), url("../illustrations/missing.png"); }';
+        ' .unused { filter: url("../illustrations/orphan.png") url("../illustrations/missing.png"); }' +
+        ' @font-face {font-family: Fixture;src: url("../illustrations/missing-font.woff2"), url("../illustrations/fixture.woff2") format("woff2");}' +
+        ' .layers { background-image: url("../illustrations/shared.png"), url("../illustrations/missing.png"); }';
     const benchmarkChapter =
         '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Fixture text</p>' +
+        (stress && !benchmark
+            ? '<p><img alt="Wrong type" src="https://assets.weread.qq.com/wrong-kind.png"/></p>'
+            : '') +
         Array.from(
             { length: 12 },
             (_, index) =>
@@ -245,7 +266,22 @@ try {
         '</body></html>';
     const first = encodeShards(metricsRun ? benchmarkChapter : fixtureXhtml, 3);
     const second = metricsRun ? first : encodeShards(fixtureHtml, 3);
-    const [style] = encodeShards(metricsRun ? 'p { margin: 1em 0; }' : stylesheet, 1);
+    const third = metricsRun
+        ? first
+        : encodeShards(
+              '<body xmlns="http://www.w3.org/1999/xhtml" lang="en-US"><img alt="Chapter illustration" src="https://assets.weread.qq.com/book-source/illustrations/shared.png"/></body>',
+              3,
+          );
+    const [style] = encodeShards(
+        metricsRun
+            ? 'p { margin: 1em 0; }' +
+                  (benchmark
+                      ? 'p { filter: url("https://assets.weread.qq.com/bench-orphan.png") url("https://assets.weread.qq.com/missing.png"); }'
+                      : '')
+            : stylesheet,
+        1,
+    );
+
     const paths = ['e_0', 'e_1', 'e_3'];
     let holdFirstShard = !metricsRun;
     let failSecondChapter = false;
@@ -268,24 +304,34 @@ try {
     events.push(({ method }) => {
         if (method === 'Browser.downloadWillBegin') downloadStarts++;
     });
+    let downloadCompletions = 0;
     const completed = new Promise<void>((resolve) =>
         events.push(({ method, params }) => {
-            if (method === 'Browser.downloadProgress' && params.state === 'completed') resolve();
+            if (
+                method === 'Browser.downloadProgress' &&
+                params.state === 'completed' &&
+                ++downloadCompletions === (parallel ? 2 : 1)
+            )
+                resolve();
         }),
     );
-    events.push(({ method, params, sessionId }) => {
+    events.push(({ method, params, sessionId: requestSession }) => {
         if (method === 'Network.loadingFailed' && heldRequests.has(params.requestId)) {
             abortedShard.resolve(params.canceled === true);
             return;
         }
         if (method !== 'Fetch.requestPaused') return;
         const url = new URL(params.request.url);
-        if (url.pathname.endsWith('/e_0')) chapterStartAt ||= performance.now();
-        const lastChapterShard = url.pathname.endsWith('/e_3') && ++chapterEnds === 2;
+        if (requestSession === sessionId && url.pathname.endsWith('/e_0'))
+            chapterStartAt ||= performance.now();
+        const lastChapterShard =
+            requestSession === sessionId &&
+            url.pathname.endsWith('/e_3') &&
+            ++chapterEnds === (metricsRun ? 2 : 3);
         if (lastChapterShard) overlapped = network.held.requests.size > 0;
         if (holdFirstShard && url.pathname.endsWith('/e_0')) {
             assert.ok(params.networkId);
-            if (sessionId === otherSession) {
+            if (requestSession === otherSession) {
                 otherShard.resolve(params.networkId);
                 return;
             }
@@ -299,10 +345,9 @@ try {
             ? JSON.parse(params.request.postData).c
             : undefined;
         const fail = failSecondChapter && api === 'e_0' && chapterId === wereadE('2');
-        const shard =
-            api === 'e_2'
-                ? style
-                : (chapterId === wereadE('2') ? second : first)[paths.indexOf(api)];
+        const encoded =
+            chapterId === wereadE('2') ? second : chapterId === wereadE('3') ? third : first;
+        const shard = api === 'e_2' ? style : encoded[paths.indexOf(api)];
         const body = url.pathname.startsWith('/web/reader/')
             ? '<title>Fixture Book - Fixture Author - \u5fae\u4fe1\u8bfb\u4e66</title><script>window.__INITIAL_STATE__={"reader":{"bookInfo":{"bookId":"42","title":"Fixture Book","language":"en-US"},"psvts":"test"}};(function(){});</script>'
             : (shard ??
@@ -311,17 +356,25 @@ try {
                       {
                           bookId: '42',
                           updated: [
+                              ...(!metricsRun
+                                  ? [{ chapterUid: '10', title: 'Part One', wordCount: 0 }]
+                                  : []),
                               {
                                   chapterUid: '1',
                                   title: '\u7248\u6743\u4fe1\u606f',
+                                  ...(metricsRun ? {} : { parentChapterUid: '10' }),
                                   wordCount: 100,
-                                  href: 'https://assets.weread.qq.com/book-source/chapter/first.xhtml',
+                                  href: 'https://assets.weread.qq.com/book-source/chapter/first.xhtml#chapter-start',
                               },
                               {
                                   chapterUid: '2',
                                   parentChapterUid: '1',
-                                  wordCount: 100,
+                                  wordCount: metricsRun ? 100 : 0,
+                                  href: 'https://assets.weread.qq.com/book-source/chapter/first.xhtml#second-content',
                               },
+                              ...(!metricsRun
+                                  ? [{ chapterUid: '3', title: 'Illustrations', wordCount: 0 }]
+                                  : []),
                           ],
                       },
                   ],
@@ -339,7 +392,7 @@ try {
                         ],
                         body: Buffer.from(body).toString('base64'),
                     },
-                    sessionId,
+                    requestSession,
                 ).catch(() => {});
             },
             params.resourceType === 'Document' ? 0 : 200,
@@ -446,8 +499,14 @@ try {
         );
         return result.value;
     }
-    async function matchPanel(selector: string, code: string, target = sessionId) {
-        for (let i = 0; i < 90; i++) {
+    async function matchPanel(
+        selector: string,
+        code: string,
+        target = sessionId,
+        timeoutMs = 9000,
+    ) {
+        const deadline = performance.now() + timeoutMs;
+        while (performance.now() < deadline) {
             if (await inspectPanel(selector, code, target)) return;
             await delay(100);
         }
@@ -474,8 +533,32 @@ try {
             }).observe(this, { childList: true });
         }`,
         );
+        if (parallel) {
+            const other = await openReaderTab();
+            otherSession = other.sessionId;
+            await send(
+                'Page.navigate',
+                { url: 'https://weread.qq.com/web/reader/parallel' },
+                otherSession,
+            );
+            await waitFor(
+                "document.readyState === 'complete' && document.title.startsWith('Fixture Book')",
+                otherSession,
+            );
+            await send('Extensions.triggerAction', { id: extension, targetId: other.targetId });
+            await matchPanel(
+                '.download-button',
+                'function() { return !this.disabled; }',
+                otherSession,
+            );
+        }
         const started = performance.now();
-        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await Promise.all([
+            inspectPanel('.download-button', 'function() { this.click(); }'),
+            ...(otherSession
+                ? [inspectPanel('.download-button', 'function() { this.click(); }', otherSession)]
+                : []),
+        ]);
         const result = await Promise.race([
             completed.then(() => true),
             delay(30000, false, { ref: false }),
@@ -498,10 +581,14 @@ try {
         );
         const file = join(downloadPath, 'Fixture Book.epub');
         const size = (await stat(file)).size;
+        const listing = execFileSync('unzip', ['-l', file], { encoding: 'utf8' });
+        const resources = [...listing.matchAll(/^\s*(\d+)\s+\S+\s+\S+\s+OEBPS\/images\//gm)];
+        const usedResourceBytes = resources.reduce((sum, row) => sum + Number(row[1]), 0);
         if (stress && !benchmark) {
             // The queue reserves space for both incoming chunks and a contiguous response.
-            assert.match(String(status), /Resources: 8\. 4 resources unavailable\./);
-            assert.equal(network.held.requests.size, 12);
+            assert.match(String(status), /Resources: 8\. 5 resources unavailable\./);
+            assert.equal(network.held.requests.size, 13);
+            assert.equal(network.held.requests.get('wrong-kind.png'), 1);
             assert.equal(network.held.peak <= 4, true);
             const paths = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' });
             assert.equal(Array.from(paths.matchAll(/^OEBPS\/images\/image_\d+\.png$/gm)).length, 8);
@@ -513,6 +600,11 @@ try {
         console.log(
             JSON.stringify({
                 fixture: stress ? 'large-images' : 'shared-images',
+                tabs: parallel ? 2 : 1,
+                unusedResourceRequests: network.held.requests.get('bench-orphan.png') ?? 0,
+                unusedResourceDownloads: network.held.completed.get('bench-orphan.png') ?? 0,
+                usedResourceBytes,
+                resourceBudgetMiB: 128,
                 totalMs: Math.round(totalMs),
                 chapterRequestMs: Math.round(chapterEndAt - chapterStartAt),
                 resourceMs: Math.round(network.held.lastResponseAt - network.held.firstRequestAt),
@@ -758,7 +850,7 @@ try {
         );
         assert.equal(
             await inspectPanel('progress', 'function() { return this.value / this.max; }'),
-            0.5,
+            1 / 3,
             'Failure retains the progress shown before the failing chapter',
         );
         assert.equal(
@@ -772,6 +864,17 @@ try {
             ),
             true,
             'The failed progress bar is red and still',
+        );
+        assert.equal(
+            await inspectPanel(
+                '#status',
+                `function() {
+            const rect = this.getBoundingClientRect();
+            return rect.height > 10 && /HTTP 503/.test(this.textContent);
+        }`,
+            ),
+            true,
+            'The failure reason is visible in the open panel',
         );
         failSecondChapter = false;
         network.held.requests.clear();
@@ -803,6 +906,8 @@ try {
         await matchPanel(
             '#status',
             "function() { return this.textContent.startsWith('EPUB sent to browser downloads.'); }",
+            sessionId,
+            20000,
         );
         assert.equal(
             await inspectPanel(
@@ -820,7 +925,7 @@ try {
                 '.resource-warning',
                 'function() { return this.hidden ? "" : this.textContent; }',
             ),
-            '9 resources unavailable.',
+            '6 resources unavailable. Some unsupported resource references were removed.',
         );
         console.log(
             'The popup has the new width and bundled font, and retry restores a successful export.',
@@ -877,13 +982,15 @@ try {
         assert.match(nextChapter, /ordinary HTML\.<br[^>]*\/>Second line\./);
         assert.doesNotMatch(nextChapter, /parsererror|parser-only/);
         assert.equal(network.held.requests.has('parser-only.png'), false);
+        assert.equal(network.held.requests.has('xhtml-parser.css'), false);
+        assert.equal(network.held.requests.has('redirect-hop.png'), false);
         assert.match(chapter, /href="#missing-image"/);
-        assert.match(chapter, /href="chapter_0002.xhtml#missing-image"/);
-        assert.match(nextChapter, /<span[^>]*id="missing-image"[^>]*>\[Illustration:/);
+        assert.match(chapter, /href="chapter_0002.xhtml#missing-second-image"/);
+        assert.match(nextChapter, /<span[^>]*id="missing-second-image"[^>]*>\[Illustration:/);
         assert.ok(chapter.includes('<title>\u7248\u6743\u4fe1\u606f</title>'));
         assert.ok(chapter.includes('href="#chapter-start"'));
         assert.doesNotMatch(chapter, /<script/);
-        assert.ok(chapter.includes('href="chapter_0002.xhtml#chapter-start"'));
+        assert.ok(chapter.includes('href="chapter_0002.xhtml#second-content"'));
         assert.match(chapter, /<style>[^<]*embedded[^<]*\.\.\/images\/image_1\.png/);
         assert.match(chapter, /style="[^"]*\.\.\/images\/image_1\.png/);
         assert.ok(chapter.includes('[Illustration: Oversized image]'));
@@ -895,7 +1002,14 @@ try {
         assert.doesNotMatch(chapter, /denied\.invalid|<animate/);
         assert.match(
             String(await inspectPanel('#status', 'function() { return this.textContent; }')),
-            /9 resources unavailable/,
+            /6 resources unavailable/,
+        );
+        const illustration = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0003.xhtml'], {
+            encoding: 'utf8',
+        });
+        assert.match(
+            illustration,
+            /<img[^>]+alt="Chapter illustration"[^>]+src="\.\.\/images\/image_1\.png"/,
         );
         const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
         assert.ok(opf.includes('properties="svg mathml"'));
@@ -915,7 +1029,11 @@ try {
             /\.responsive\s*\{[^}]*image-set\(url\("\.\.\/images\/image_\d+\.png"\) 1(?:x|dppx)\)/,
         );
         assert.doesNotMatch(css, /\.unused\s*\{[^}]*url\(/);
-        assert.equal(network.held.requests.get('orphan.png'), 1);
+        assert.equal(network.held.requests.has('orphan.png'), false);
+        assert.match(css, /@font-face[^}]*\.woff2/);
+        assert.match(css, /\.layers[^}]*image_1\.png[^}]*none/);
+        assert.match(opf, /media-type="font\/woff2"/);
+        assert.match(nav, /<span>Part One<\/span>/);
         assert.equal(network.held.requests.get('responsive.png'), 1);
         assert.equal(Array.from(opf.matchAll(/media-type="image\/png"/g)).length, 7);
         assert.doesNotMatch(css, /example\.invalid/);

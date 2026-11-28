@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.4 - 2026-11-28
+
+### Fixed
+
+- Surface actionable export errors while keeping the download panel compact. Explain how to retry when WeRead returns no catalog.
+- Keep HTML fallback parsing inert and retain document language, base URLs, and body attributes.
+- Export valid zero-word and image-only chapters, retain section headings, and resolve shared chapter URLs by fragment.
+- Release incompatible resource bytes promptly and retain usable CSS layers and font sources.
+
+### Tests
+
+- Verify parsing and redirects against a controlled HTTPS server in Chrome.
+- Stress the resource budget with an incompatible response and add a two-tab benchmark.
+
 ## v0.4.3 - 2026-11-28
 
 ### Changed

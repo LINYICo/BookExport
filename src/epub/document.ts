@@ -1,3 +1,4 @@
+import { rewriteCss, type ResolveResource } from './css.ts';
 function bytesStartWith(data: Uint8Array, magic: number[]) {
     if (data.length < magic.length) return false;
     for (let i = 0; i < magic.length; i++) {
@@ -40,65 +41,100 @@ export function escapeXml(value: unknown) {
 
 export function parseChapter(source: string, readerUrl: string, catalogHref?: string) {
     const clean = validXmlText(source);
-    const parser = new DOMParser();
-    const xml = parser.parseFromString(clean, 'application/xhtml+xml');
-    const doc = parser.parseFromString('', 'text/html');
-    // Chromium can insert its own <body> around XML errors.
-    const xmlBody = xml.querySelector('parsererror') ? undefined : xml.querySelector('body');
-    const sourceRoot = xmlBody ? xml : parser.parseFromString(clean, 'text/html');
-    const body = xmlBody ?? sourceRoot.body;
+    const template = document.createElement('template');
+    const inert = template.content.ownerDocument;
+    const docBody = inert.createElement('body');
+
+    // Ignore processing instructions and DTDs that could resolve external documents.
+    const externalXml = /<\?xml-stylesheet\b|<!DOCTYPE[^>]*(?:\bSYSTEM\b|\bPUBLIC\b|\[)/i;
+    const xml = externalXml.test(clean)
+        ? undefined
+        : new DOMParser().parseFromString(clean, 'application/xhtml+xml');
+    const xmlBody = xml?.querySelector('parsererror') ? undefined : xml?.querySelector('body');
+
+    let root: Element;
+    let body: Element | null;
+    if (xmlBody && xml) {
+        root = xml.documentElement;
+        body = xmlBody;
+    } else {
+        // An HTML-context fragment preserves the head and body on an inert template document.
+        root = inert.createElement('html');
+        root.innerHTML = clean;
+        body = root.querySelector('body');
+        // The fragment algorithm ignores the outer html tag. Read its attributes separately.
+        const opening = clean.match(
+            /^\s*(?:(?:<!--[\s\S]*?-->|<!doctype[^>]*>|<\?[\s\S]*?\?>)\s*)*<html(?=[\s>])((?:[^>"']|"[^"]*"|'[^']*')*)>/i,
+        )?.[1];
+        if (opening) {
+            template.innerHTML = '<div' + opening + '></div>';
+            for (const name of ['lang', 'xml:lang', 'xml:base']) {
+                const value = template.content.firstElementChild?.getAttribute(name);
+                if (value !== null && value !== undefined) root.setAttribute(name, value);
+            }
+        }
+    }
     const embeddedCss = Array.from(
-        sourceRoot.querySelectorAll('style'),
+        root.querySelectorAll('style'),
         (element) => element.textContent,
     ).join('\n');
-    const canonical = sourceRoot.querySelector('link[rel="canonical"]')?.getAttribute('href');
+    const canonical = root.querySelector('link[rel="canonical"]')?.getAttribute('href');
     const href = httpsURL(catalogHref ?? '', readerUrl) ?? httpsURL(canonical ?? '', readerUrl);
     const sourceBase =
-        sourceRoot.querySelector('base[href]')?.getAttribute('href') ??
+        root.querySelector('base[href]')?.getAttribute('href') ??
         body?.getAttribute('xml:base') ??
-        sourceRoot.documentElement.getAttribute('xml:base');
+        root.getAttribute('xml:base');
     const base = httpsURL(sourceBase ?? '', href?.href ?? readerUrl) ?? href ?? new URL(readerUrl);
     if (body) {
         for (const name of ['class', 'id', 'style']) {
             const value = body.getAttribute(name);
-            if (value !== null) doc.body.setAttribute(name, value);
+            if (value !== null) docBody.setAttribute(name, value);
         }
         const direction = body.getAttribute('dir')?.toLowerCase();
         if (direction === 'ltr' || direction === 'rtl' || direction === 'auto')
-            doc.body.dir = direction;
+            docBody.dir = direction;
         const language = languageTag(body.getAttribute('lang') ?? body.getAttribute('xml:lang'));
-        if (language) doc.body.lang = language;
-        for (const node of body.childNodes) doc.body.append(doc.importNode(node, true));
+        if (language) docBody.lang = language;
+        for (const node of body.childNodes) docBody.append(inert.importNode(node, true));
     }
-    doc.body
+    docBody
         .querySelectorAll(
             'script, iframe, frame, object, embed, link, base, meta, form, audio, video, source, style, foreignObject, animate, animateMotion, animateTransform, set, discard, template',
         )
         .forEach((element) => element.remove());
-    for (const element of doc.body.querySelectorAll('*')) {
-        for (const { name, value } of Array.from(element.attributes)) {
+    for (const element of docBody.querySelectorAll('*')) {
+        for (const attribute of Array.from(element.attributes)) {
+            const { name, value, namespaceURI, localName } = attribute;
             if (
                 name.toLowerCase().startsWith('on') ||
                 ['srcset', 'data-src', 'poster', 'ping', 'background', 'xml:base'].includes(name)
-            )
-                element.removeAttribute(name);
-            if (
-                (name === 'href' || name === 'xlink:href') &&
-                !value.startsWith('#') &&
-                !(['a', 'image'].includes(element.localName) && httpsURL(value, base.href))
-            )
-                element.removeAttribute(name);
-            if (name === 'src' && element.localName !== 'img') element.removeAttribute(name);
+            ) {
+                element.removeAttributeNode(attribute);
+                continue;
+            }
+            const xlink = namespaceURI === 'http://www.w3.org/1999/xlink' && localName === 'href';
+            if (name === 'href' || xlink) {
+                const permitted =
+                    value.startsWith('#') ||
+                    (['a', 'image'].includes(element.localName) && httpsURL(value, base.href));
+                if (!permitted || (xlink && ['a', 'image'].includes(element.localName))) {
+                    element.removeAttributeNode(attribute);
+                    if (permitted && !element.hasAttribute('href'))
+                        element.setAttribute('href', value);
+                }
+            }
+            if (name === 'src' && element.localName !== 'img')
+                element.removeAttributeNode(attribute);
         }
         const anchorName = element.localName === 'a' && element.getAttribute('name');
         if (anchorName && !element.id) element.id = anchorName;
     }
     const properties = [
-        ...(doc.body.querySelector('svg') ? ['svg' as const] : []),
-        ...(doc.body.querySelector('math') ? ['mathml' as const] : []),
+        ...(docBody.querySelector('svg') ? ['svg' as const] : []),
+        ...(docBody.querySelector('math') ? ['mathml' as const] : []),
     ];
     return {
-        body: doc.body,
+        body: docBody,
         base: base.href,
         href: href?.href,
         properties,
@@ -106,8 +142,8 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
         language: languageTag(
             body?.getAttribute('lang') ||
                 body?.getAttribute('xml:lang') ||
-                sourceRoot.documentElement.getAttribute('xml:lang') ||
-                sourceRoot.documentElement.getAttribute('lang'),
+                root.getAttribute('xml:lang') ||
+                root.getAttribute('lang'),
         ),
     };
 }
@@ -120,106 +156,6 @@ export function httpsURL(value: string, base: string) {
     } catch {
         return undefined;
     }
-}
-
-export function rewriteCss(
-    css: string,
-    resolve: (url: string) => string | undefined,
-    inline = false,
-    use?: (path: string) => void,
-) {
-    const declarations = (style: CSSStyleDeclaration) => {
-        for (const property of Array.from(style)) {
-            const urlTokens = /url\("((?:[^"\\]|\\.)*)"\)/gi;
-            // CSSOM normalizes straightforward candidates to quoted strings or url().
-            const imageSets =
-                /\bimage-set\(((?:(?:url|type)\("(?:[^"\\]|\\.)*"\)|"(?:[^"\\]|\\.)*"|[^()'"])+)\)/gi;
-            const candidates = /(?:(?:url|type)\("(?:[^"\\]|\\.)*"\)|"(?:[^"\\]|\\.)*"|[^,])+/gi;
-            const original = style
-                .getPropertyValue(property)
-                .replace(
-                    imageSets,
-                    (_, list: string) =>
-                        'image-set(' +
-                        (list.match(candidates) ?? [])
-                            .map((item) => item.trim().replace(/^("(?:[^"\\]|\\.)*")/, 'url($1)'))
-                            .join(', ') +
-                        ')',
-                );
-            const raw = original
-                .replace(urlTokens, '')
-                .replace(/\btype\("(?:[^"\\]|\\.)*"\)/gi, '');
-            // Unresolved variables and custom properties can contain unparsed URL tokens.
-            if (
-                (property.startsWith('--') &&
-                    /["'\\]|\b(?:url|image|image-set|src)\s*\(/i.test(original)) ||
-                /\burl\s*\(/i.test(raw) ||
-                (/\b(?:image-set|image|src)\s*\(/i.test(raw) && /["'\\]/.test(raw)) ||
-                (/\bvar\s*\(/i.test(raw) && raw.includes('\\'))
-            ) {
-                resolve('');
-                style.removeProperty(property);
-                continue;
-            }
-            const mappedPaths = new Set<string>();
-            const missing = 'url("")';
-            const value = original
-                .replace(urlTokens, (whole: string, target: string) => {
-                    if (target.startsWith('#')) return whole;
-                    const decoded = target.replace(
-                        /\\(?:([0-9a-f]{1,6})[ \t\n\r\f]?|([^\n\r\f]))/gi,
-                        (_, hex: string | undefined, escaped: string | undefined) => {
-                            if (!hex) return escaped ?? '';
-                            const codePoint = Number.parseInt(hex, 16);
-                            return codePoint > 0 && codePoint <= 0x10ffff
-                                ? String.fromCodePoint(codePoint)
-                                : '\ufffd';
-                        },
-                    );
-                    const mapped = resolve(decoded);
-                    if (!mapped) return missing;
-                    mappedPaths.add(mapped);
-                    return 'url(' + JSON.stringify(mapped) + ')';
-                })
-                .replace(imageSets, (_, list: string) => {
-                    const kept = (list.match(candidates) ?? []).filter(
-                        (item) => !item.includes(missing),
-                    );
-                    return kept.length ? 'image-set(' + kept.join(',') + ')' : missing;
-                });
-            const priority = style.getPropertyPriority(property);
-            style.removeProperty(property);
-            if (value.includes(missing)) continue;
-            style.setProperty(property, value, priority);
-            if (use && mappedPaths.size)
-                for (const [, path] of style.getPropertyValue(property).matchAll(urlTokens))
-                    if (path && mappedPaths.has(path)) use(path);
-        }
-    };
-    if (inline) {
-        const style = document.createElement('span').style;
-        style.cssText = css;
-        declarations(style);
-        return style.cssText;
-    }
-    // Constructable stylesheets discard imports without exposing them through CSSOM.
-    const tokens =
-        /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|@import(?=[^a-z0-9_-]|$)/gi;
-    for (const [token] of css.matchAll(tokens)) {
-        if (token.toLowerCase() === '@import') resolve('');
-    }
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(css);
-    function rewriteRules(rules: CSSRuleList) {
-        for (const rule of rules) {
-            if ('style' in rule && rule.style instanceof CSSStyleDeclaration)
-                declarations(rule.style);
-            if ('cssRules' in rule && rule.cssRules instanceof CSSRuleList)
-                rewriteRules(rule.cssRules);
-        }
-    }
-    rewriteRules(sheet.cssRules);
-    return Array.from(sheet.cssRules, (rule) => rule.cssText).join('\n');
 }
 
 export function languageTag(value: unknown) {
@@ -241,14 +177,14 @@ export type ChapterDocument = Omit<ParsedChapter, 'body'> & {
 export function chapterResources(
     body: Element,
     css: string,
-    resolve: (url: string, imageOnly?: boolean) => string | undefined,
+    resolve: ResolveResource,
     use?: (path: string) => void,
 ) {
     for (const image of body.querySelectorAll('img, svg image')) {
         const html = image.localName === 'img';
         const attribute = html ? 'src' : image.hasAttribute('href') ? 'href' : 'xlink:href';
         const src = image.getAttribute(attribute);
-        const href = resolve(src ?? '', true);
+        const href = resolve(src ?? '', 'image');
         if (!use) continue;
         if (!html && attribute === 'href') image.removeAttribute('xlink:href');
         if (href) {
@@ -285,7 +221,13 @@ export function chapterResources(
     }
     for (const element of body.querySelectorAll('svg, svg *')) {
         for (const { name, value } of Array.from(element.attributes)) {
-            if (!/url\s*\(/i.test(value) || name === 'style') continue;
+            if (name === 'style') continue;
+            const escapedPresentation =
+                value.includes('\\') &&
+                /^(?:fill|stroke|clip-path|mask|filter|cursor|color-profile|marker(?:-start|-mid|-end)?)$/i.test(
+                    name,
+                );
+            if (!escapedPresentation && !/url\s*\(/i.test(value)) continue;
             // Presentation attributes can reference symbols in the same chapter.
             if (/^url\(\s*['"]?#[\w:.-]+['"]?\s*\)$/i.test(value.trim())) continue;
             if (use) element.removeAttribute(name);
@@ -296,12 +238,14 @@ export function chapterResources(
 }
 
 export function chapterIndex(chapters: ChapterDocument[]) {
-    const documents = new Map<string, number>();
+    const documents = new Map<string, number[]>();
     for (const [index, chapter] of chapters.entries()) {
         if (!chapter.href) continue;
         const url = new URL(chapter.href);
         url.hash = '';
-        documents.set(url.href, index);
+        const entries = documents.get(url.href);
+        if (entries) entries.push(index);
+        else documents.set(url.href, [index]);
     }
     return documents;
 }
@@ -310,7 +254,7 @@ export function rewriteChapterLinks(
     body: Element,
     index: number,
     chapters: ChapterDocument[],
-    documents: Map<string, number>,
+    documents: Map<string, number[]>,
 ) {
     const chapter = chapters[index];
     if (!chapter) return;
@@ -322,17 +266,24 @@ export function rewriteChapterLinks(
             continue;
         }
         let fragment = url.hash;
+        const fullHref = url.href;
         url.hash = '';
-        const target = href.startsWith('#') ? index : documents.get(url.href);
+        let id = '';
+        try {
+            id = decodeURIComponent(fragment.slice(1));
+        } catch {
+            fragment = '';
+        }
+        const candidates = documents.get(url.href) ?? [];
+        const target = href.startsWith('#')
+            ? index
+            : (candidates.find((candidate) => chapters[candidate]?.href === fullHref) ??
+              (id
+                  ? candidates.find((candidate) => chapters[candidate]?.anchors.has(id))
+                  : undefined) ??
+              (candidates.length === 1 || !fragment ? candidates[0] : undefined));
         if (target !== undefined) {
-            if (fragment) {
-                try {
-                    if (!chapters[target]?.anchors.has(decodeURIComponent(fragment.slice(1))))
-                        fragment = '';
-                } catch {
-                    fragment = '';
-                }
-            }
+            if (fragment && !chapters[target]?.anchors.has(id)) fragment = '';
             if (target === index && !fragment && href.startsWith('#')) {
                 anchor.removeAttribute('href');
                 continue;
@@ -342,7 +293,7 @@ export function rewriteChapterLinks(
                     ? ''
                     : chapterFileName(target + 1).slice('text/'.length);
             anchor.setAttribute('href', filename + fragment);
-        } else if (!/^https:\/\//i.test(href)) anchor.removeAttribute('href');
+        } else if (candidates.length || !/^https:\/\//i.test(href)) anchor.removeAttribute('href');
     }
 }
 

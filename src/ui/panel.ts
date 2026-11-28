@@ -89,6 +89,7 @@ export function createDownloadPanel(onDownload: () => void) {
 
         const announcement = message || (available ? '' : 'Open a book in the WeRead reader.');
         if (status.textContent !== announcement) status.textContent = announcement;
+        status.classList.toggle('visually-hidden', !failed);
         const label =
             stage === 'cancelling'
                 ? 'Cancelling…'

@@ -186,3 +186,39 @@ test('large chapter discovery pauses while the pending queue is full', async () 
     await assert.rejects(adding, { name: 'AbortError' });
     await queue.drain();
 });
+
+test('mistyped resources free their reservation and counts are independent of path lookups', async () => {
+    const limits: number[] = [];
+    const fakeFont = new TextEncoder().encode('wOF2xxxx');
+    const queue = createAssetQueue(
+        async (url, limit) => {
+            limits.push(limit);
+            return { status: 'downloaded', data: url.endsWith('/wrong.png') ? fakeFont : png };
+        },
+        new AbortController().signal,
+        () => 0,
+        { budget: 20, maxResource: 8 },
+    );
+    await queue.add(
+        [
+            { value: 'wrong.png', kind: 'image' },
+            { value: 'wrong.png#duplicate', kind: 'image' },
+            { value: 'right.png', kind: 'image' },
+            'https://denied.invalid/no.png',
+            'https://denied.invalid/no.png#duplicate',
+        ],
+        base,
+    );
+    await queue.drain();
+    assert.deepEqual(limits, [8, 8]);
+    assert.equal(queue.path('wrong.png', base, 'image'), undefined);
+    assert.equal(queue.path('wrong.png', base, 'font'), undefined);
+    const outcome = queue.result();
+    assert.equal(outcome.assets.length, 1);
+    assert.equal(outcome.downloaded, 2);
+    assert.equal(outcome.unique, 3);
+    assert.equal(outcome.references, 5);
+    assert.equal(outcome.unavailable, 2);
+    assert.equal(outcome.missingReferences, 4);
+    assert.deepEqual(outcome.failures, { policy: 1, unsupported: 1 });
+});

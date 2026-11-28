@@ -55,10 +55,11 @@ export async function resourceServer(workspace: string, stress = false) {
         ],
         { stdio: 'ignore' },
     );
-    const [key, cert, png] = await Promise.all([
+    const [key, cert, png, font] = await Promise.all([
         readFile(keyFile),
         readFile(certFile),
         readFile('public/icons/icon48.png'),
+        readFile('src/ui/fonts/teko-bookexport.woff2'),
     ]);
     const spki = new X509Certificate(cert).publicKey.export({ type: 'spki', format: 'der' });
     const fingerprint = createHash('sha256').update(spki).digest('base64');
@@ -69,6 +70,7 @@ export async function resourceServer(workspace: string, stress = false) {
         aborted: 0,
         credentials: 0,
         requests: new Map<string, number>(),
+        completed: new Map<string, number>(),
         streamed: 0,
         firstRequestAt: 0,
         lastResponseAt: 0,
@@ -89,6 +91,8 @@ export async function resourceServer(workspace: string, stress = false) {
             held.active--;
             held.lastResponseAt = performance.now();
             if (isHeld && !response.writableFinished) held.aborted++;
+            if (!isHeld && response.writableFinished && response.statusCode === 200)
+                held.completed.set(name, (held.completed.get(name) ?? 0) + 1);
         });
         response.setHeader('Cache-Control', 'no-store');
         if (isHeld) {
@@ -101,9 +105,14 @@ export async function resourceServer(workspace: string, stress = false) {
             if (name.endsWith('redirect.png')) {
                 const host =
                     name === 'approved-redirect.png' ? 'assets.myqcloud.com' : 'denied.invalid';
-                response.writeHead(302, { Location: 'https://' + host + '/redirect-target.png' });
+                const target =
+                    name === 'approved-redirect.png' ? 'redirect-hop.png' : 'redirect-target.png';
+                response.writeHead(302, { Location: 'https://' + host + '/' + target });
                 response.end();
-            } else if (name === 'missing.png') {
+            } else if (name === 'redirect-hop.png') {
+                response.writeHead(302, { Location: 'https://denied.invalid/redirect-target.png' });
+                response.end();
+            } else if (name === 'missing.png' || name === 'missing-font.woff2') {
                 response.writeHead(404);
                 response.end();
             } else if (name === 'oversize.png') {
@@ -119,7 +128,14 @@ export async function resourceServer(workspace: string, stress = false) {
                 response.once('close', () => stream.destroy());
                 stream.pipe(response);
             } else {
-                const data = large ?? png;
+                const data = name === 'fixture.woff2' ? font : (large ?? png);
+                if (name === 'wrong-kind.png') {
+                    const wrong = Buffer.from(data);
+                    wrong.write('wOF2');
+                    response.setHeader('Content-Length', wrong.length);
+                    response.end(wrong);
+                    return;
+                }
                 response.setHeader('Content-Length', data.length);
                 response.end(data);
             }

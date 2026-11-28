@@ -19,6 +19,7 @@ import {
 } from '../../src/weread/protocol.ts';
 import {
     parseReaderState,
+    createWeReadClient,
     extractInitialState,
     normalizeCatalog,
     selectExportableChapters,
@@ -220,8 +221,8 @@ test('parseReaderState extracts book metadata and psvts', () => {
 });
 
 test('parseReaderState requires a book ID and uses it as the fallback title', () => {
-    assert.throws(() => parseReaderState({ reader: {} }), /bookId/);
-    assert.throws(() => parseReaderState(null), /bookId/);
+    assert.throws(() => parseReaderState({ reader: {} }), /Open a book/);
+    assert.throws(() => parseReaderState(null), /Open a book/);
     const state = parseReaderState({ reader: { bookInfo: { bookId: '42' }, psvts: '' } });
     assert.equal(state.title, '42');
 });
@@ -251,23 +252,24 @@ test('normalizeCatalog skips entries without a chapter UID and reports missing b
     assert.throws(() => normalizeCatalog({ data: [{ bookId: 'other' }] }, '42'), /catalog/);
 });
 
-test('selectExportableChapters skips covers and chapters without words', () => {
+test('chapter selection keeps image and front-matter leaves and preserves group ancestry', () => {
     const chapters = [
-        { chapterUid: 1, title: '\u5c01\u9762', wordCount: 500 },
-        { chapterUid: 2, title: 'Chapter One', wordCount: 100 },
-        { chapterUid: 3, title: 'Chapter Two', wordCount: 0 },
-        { chapterUid: 4, title: 'Chapter Three' },
+        { chapterUid: 20, title: 'Part One', wordCount: 0 },
+        { chapterUid: 21, title: 'Illustrations', parentChapterUid: '20', wordCount: 0 },
+        { chapterUid: 22, title: 'Copyright', parentChapterUid: '20' },
+        { chapterUid: '021', title: 'Duplicate entry', wordCount: 200 },
+        { chapterUid: 23, title: '\u5c01\u9762', wordCount: 2 },
+        { chapterUid: -1, title: 'Invalid ID' },
+        { chapterUid: 'NaN', title: 'Invalid ID' },
     ];
     const result = selectExportableChapters(chapters);
     assert.deepEqual(
-        result.map((c) => c.chapterUid),
-        [2],
+        result.map((chapter) => chapter.chapterUid),
+        [21, 22],
     );
+    assert.deepEqual(result[0]?.sections, [{ id: 20, title: 'Part One' }]);
+    assert.deepEqual(result[1]?.sections, [{ id: 20, title: 'Part One' }]);
 });
-
-// Chapter content
-
-// Image assets
 
 test('imageExtensionAndType identifies images by their signatures', () => {
     assert.deepEqual(
@@ -498,14 +500,14 @@ test('extractInitialState extracts state JSON from the reader HTML', () => {
 test('extractInitialState reports missing or malformed state', () => {
     assert.throws(
         () => extractInitialState('<html><body>Reader layout changed</body></html>'),
-        /__INITIAL_STATE__/,
+        /book details/,
     );
     assert.throws(
         () =>
             extractInitialState(
                 '<script>window.__INITIAL_STATE__ = {broken};(function(){});</script>',
             ),
-        /Could not parse/,
+        /invalid book details/,
     );
 });
 
@@ -850,4 +852,29 @@ test('ZIP cancels while compressing a large entry', async () => {
     const archive = buildZip([{ name: 'chapter.xhtml', data: bytes }], Date.now(), job.signal);
     setImmediate(() => job.abort());
     await assert.rejects(archive, { name: 'AbortError' });
+});
+
+test('access errors distinguish signing in from book permission without exposing response details', async (t) => {
+    const exporter = createWeReadClient(new AbortController().signal, 1000, [], () => 0);
+    let status = 401;
+    t.mock.method(
+        globalThis,
+        'fetch',
+        async () => new Response('private response text', { status }),
+    );
+    await assert.rejects(
+        exporter.reader('https://weread.qq.com/web/reader/sample'),
+        (error: unknown) =>
+            error instanceof Error &&
+            /session expired/.test(error.message) &&
+            !error.message.includes('private response text'),
+    );
+    status = 403;
+    await assert.rejects(
+        exporter.reader('https://weread.qq.com/web/reader/sample'),
+        (error: unknown) =>
+            error instanceof Error &&
+            /denied access/.test(error.message) &&
+            !error.message.includes('private response text'),
+    );
 });
