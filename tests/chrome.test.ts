@@ -229,10 +229,6 @@ try {
             .replace('id="chapter-start"', 'id="second-content"')
             .replaceAll('missing-image', 'missing-second-image')
             .replace(
-                '<p id="second-content">A chapter for the browser download test.</p>',
-                '<p id="second-content">A chapter for the browser download test.</p>',
-            )
-            .replace(
                 '</head>',
                 '<base href="https://assets.weread.qq.com/book-source/chapter/"></head>',
             )
@@ -276,7 +272,7 @@ try {
     const third = metricsRun
         ? first
         : encodeShards(
-              '<body xmlns="http://www.w3.org/1999/xhtml" lang="en-US"><img alt="Chapter illustration" src="https://assets.weread.qq.com/book-source/illustrations/shared.png"/></body>',
+              '<body lang="en-US"><p><img alt="Chapter illustration" src="https://assets.weread.qq.com/book-source/illustrations/shared.png"/></p></body>',
               3,
           );
     const [style] = encodeShards(
@@ -1062,6 +1058,7 @@ try {
             illustration,
             /<img[^>]+alt="Chapter illustration"[^>]+src="\.\.\/images\/image_1\.png"/,
         );
+        assert.doesNotMatch(illustration, /xmlns=""/);
         const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
         assert.ok(opf.includes('properties="svg mathml"'));
         assert.ok(opf.includes('<dc:language>en-US</dc:language>'));

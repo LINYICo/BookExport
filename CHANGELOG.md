@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.6 - 2026-11-28
+
+### Fixed
+
+- Preserve chapters and illustrations when WeRead returns well-formed markup without the XHTML namespace.
+
 ## v0.4.5 - 2026-11-28
 
 ### Fixed

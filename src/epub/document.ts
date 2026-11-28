@@ -58,7 +58,7 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
 
     let root: Element;
     let body: Element | null;
-    if (xmlBody && xml) {
+    if (xml && xmlBody?.namespaceURI === docBody.namespaceURI) {
         root = xml.documentElement;
         body = xmlBody;
     } else {
