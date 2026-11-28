@@ -264,7 +264,14 @@ try {
                 '.png"/></p>',
         ).join('') +
         '</body></html>';
-    const first = encodeShards(metricsRun ? benchmarkChapter : fixtureXhtml, 3);
+    const first = encodeShards(
+        metricsRun
+            ? benchmarkChapter
+            : '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n' +
+                  '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "https://denied.invalid/xhtml-parser.dtd">\n' +
+                  fixtureXhtml.replace('<head>', '<head><title/>'),
+        3,
+    );
     const second = metricsRun ? first : encodeShards(fixtureHtml, 3);
     const third = metricsRun
         ? first
@@ -628,7 +635,18 @@ try {
         );
         assert.equal(
             await inspectPanel('main', 'function() { return this.getBoundingClientRect().width; }'),
-            318,
+            300,
+        );
+        assert.equal(
+            await inspectPanel(
+                'main',
+                'function() { return this.getBoundingClientRect().height; }',
+            ),
+            280,
+        );
+        assert.equal(
+            await inspectPanel('.download', 'function() { return getComputedStyle(this).rowGap; }'),
+            '14px',
         );
         assert.equal(
             await inspectPanel(
@@ -640,13 +658,40 @@ try {
         await matchPanel(
             '.product',
             `function() {
-            return getComputedStyle(this).fontFamily.includes('BookExport Teko') &&
+            return getComputedStyle(this).fontSize === '18px' &&
+                getComputedStyle(this).fontFamily.includes('BookExport Teko') &&
                 [...document.fonts].some(font => font.family === 'BookExport Teko' && font.status === 'loaded');
         }`,
         );
         assert.equal(
             await inspectPanel('#book-title', 'function() { return this.textContent; }'),
             'Fixture Book - Fixture Author',
+        );
+        assert.equal(
+            await inspectPanel(
+                '.close',
+                `function() {
+                this.focus();
+                return getComputedStyle(this).outlineStyle;
+            }`,
+            ),
+            'none',
+        );
+        assert.equal(
+            await inspectPanel(
+                '#book-title',
+                `function() {
+                const title = this.textContent;
+                this.textContent = title.repeat(6);
+                const panel = this.closest('main');
+                const fits = panel.getBoundingClientRect().height > 280 &&
+                    panel.scrollHeight === panel.clientHeight;
+                this.textContent = title;
+                return fits;
+            }`,
+            ),
+            true,
+            'A long title expands the popup without scrolling',
         );
         await inspectPanel('.download-button', 'function() { this.click(); }');
         await Promise.race([
@@ -870,7 +915,11 @@ try {
                 '#status',
                 `function() {
             const rect = this.getBoundingClientRect();
-            return rect.height > 10 && /HTTP 503/.test(this.textContent);
+            const panel = this.closest('main');
+            return rect.height > 10 && /HTTP 503/.test(this.textContent) &&
+                this.previousElementSibling.id === 'book-title' &&
+                getComputedStyle(this).color === 'rgb(160, 37, 52)' &&
+                panel.getBoundingClientRect().height > 280 && panel.scrollHeight === panel.clientHeight;
         }`,
             ),
             true,
@@ -983,6 +1032,8 @@ try {
         assert.doesNotMatch(nextChapter, /parsererror|parser-only/);
         assert.equal(network.held.requests.has('parser-only.png'), false);
         assert.equal(network.held.requests.has('xhtml-parser.css'), false);
+        assert.equal(network.held.requests.has('xhtml-parser.dtd'), false);
+        assert.match(chapter, /A chapter for the browser download test\./);
         assert.equal(network.held.requests.has('redirect-hop.png'), false);
         assert.match(chapter, /href="#missing-image"/);
         assert.match(chapter, /href="chapter_0002.xhtml#missing-second-image"/);

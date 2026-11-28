@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.5 - 2026-11-28
+
+### Fixed
+
+- Preserve chapter bodies in WeRead XHTML with external doctypes. Stop exports when a chapter with a positive word count has no usable content.
+- Let the popup grow for long book titles and show red errors directly below the title.
+- Replace the close button's blue focus ring with a neutral keyboard focus indicator.
+
+### Changed
+
+- Set the popup to 300 px wide and at least 280 px tall, with an 18 px wordmark and 14 px spacing.
+
 ## v0.4.4 - 2026-11-28
 
 ### Fixed

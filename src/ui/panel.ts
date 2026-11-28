@@ -25,11 +25,11 @@ export function createDownloadPanel(onDownload: () => void) {
                     <div class="ebook">EPUB</div>
                 </div>
                 <h1 id="book-title">Download a book</h1>
+                <p id="status" class="visually-hidden" role="status"></p>
                 <div class="progress-track" hidden>
                     <span class="progress-fill" aria-hidden="true"></span>
                     <progress class="visually-hidden" aria-label="EPUB download progress"></progress>
                 </div>
-                <p id="status" class="visually-hidden" role="status"></p>
                 <button class="download-button" type="button" disabled>Download EPUB</button>
                 <p class="download-result" hidden>Export complete</p>
                 <p class="resource-warning" hidden></p>

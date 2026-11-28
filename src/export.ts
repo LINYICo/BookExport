@@ -128,6 +128,15 @@ export function createEbookExport({
                 const source = await client.chapter(book, chapter);
                 serializer ??= new XMLSerializer();
                 const { body, ...parsed } = parseChapter(source, readerUrl, chapter.href);
+                if (
+                    Number(chapter.wordCount) > 0 &&
+                    !body.textContent.trim() &&
+                    !body.querySelector('img, svg, math')
+                )
+                    throw new ExportError(
+                        'A chapter has no exportable content. Refresh the reader and retry.',
+                    );
+
                 const references: ResourceReference[] = [];
                 chapterResources(body, parsed.embeddedCss, (value, kind) => {
                     references.push({ value, kind });

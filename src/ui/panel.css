@@ -15,7 +15,8 @@ main {
     border: 1px solid var(--line);
     border-radius: 15px;
     box-shadow: 0 8px 30px #17203330;
-    width: min(318px, calc(100vw - 24px));
+    width: min(300px, calc(100vw - 24px));
+    min-height: min(280px, calc(100vh - 26px));
     max-height: calc(100vh - 26px);
     overflow: auto;
     font:
@@ -23,6 +24,10 @@ main {
         sans-serif;
     color: light-dark(#172033, #e9eff9);
     background: light-dark(#fff, #202938);
+}
+main:popover-open {
+    display: flex;
+    flex-direction: column;
 }
 main [hidden] {
     display: none;
@@ -32,7 +37,7 @@ header {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 9px 10px 6px 14px;
+    padding: 11px 11px 7px 16px;
 }
 h1,
 p {
@@ -40,7 +45,7 @@ p {
 }
 .product {
     font:
-        600 25px/1 'BookExport Teko',
+        600 18px/1 'BookExport Teko',
         'Arial Narrow',
         sans-serif;
     letter-spacing: 0.015em;
@@ -71,6 +76,10 @@ button:focus-visible {
     border-radius: 50%;
     background: transparent;
     color: #485369;
+    -webkit-tap-highlight-color: transparent;
+}
+.close:focus-visible {
+    outline: none;
 }
 .close::before {
     content: '';
@@ -91,16 +100,22 @@ button:focus-visible {
 .close:hover::before {
     background: #dbe2ec;
 }
+.close:focus-visible::before {
+    background: #c7d1df;
+}
 
 .download {
-    display: grid;
-    gap: 10px;
-    padding: 0 14px 14px;
+    display: flex;
+    flex: 1 0 auto;
+    flex-direction: column;
+    gap: 14px;
+    padding: 0 16px 17px;
 }
 .preview {
     display: grid;
     place-items: center;
-    min-height: 108px;
+    flex: 1 0 auto;
+    min-height: 96px;
     border: 1px solid light-dark(#f3e7ca, #5b4d33);
     border-radius: 12px;
     background: radial-gradient(

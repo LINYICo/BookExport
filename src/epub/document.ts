@@ -45,11 +45,15 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
     const inert = template.content.ownerDocument;
     const docBody = inert.createElement('body');
 
-    // Ignore processing instructions and DTDs that could resolve external documents.
+    // WeRead uses an external XHTML 1.1 doctype and XML-only syntax in these chapters.
+    // Remove a plain external declaration before parsing, without resolving it or its entities.
+    const externalDoctype =
+        /^(\s*(?:(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->)\s*)*)<!DOCTYPE\s+html\s+(?:PUBLIC\s+(?:"[^"]*"|'[^']*')\s+|SYSTEM\s+)(?:"[^"]*"|'[^']*')\s*>/i;
+    const xmlSource = clean.replace(externalDoctype, '$1');
     const externalXml = /<\?xml-stylesheet\b|<!DOCTYPE[^>]*(?:\bSYSTEM\b|\bPUBLIC\b|\[)/i;
-    const xml = externalXml.test(clean)
+    const xml = externalXml.test(xmlSource)
         ? undefined
-        : new DOMParser().parseFromString(clean, 'application/xhtml+xml');
+        : new DOMParser().parseFromString(xmlSource, 'application/xhtml+xml');
     const xmlBody = xml?.querySelector('parsererror') ? undefined : xml?.querySelector('body');
 
     let root: Element;
@@ -60,7 +64,7 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
     } else {
         // An HTML-context fragment preserves the head and body on an inert template document.
         root = inert.createElement('html');
-        root.innerHTML = clean;
+        root.innerHTML = xmlSource;
         body = root.querySelector('body');
         // The fragment algorithm ignores the outer html tag. Read its attributes separately.
         const opening = clean.match(
