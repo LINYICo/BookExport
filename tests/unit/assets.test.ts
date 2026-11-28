@@ -222,3 +222,66 @@ test('mistyped resources free their reservation and counts are independent of pa
     assert.equal(outcome.missingReferences, 4);
     assert.deepEqual(outcome.failures, { policy: 1, unsupported: 1 });
 });
+
+test('budget recovery retries only useful resources with a larger allowance', async (t) => {
+    const reads: number[] = [];
+    const queue = createAssetQueue(
+        async (_url, limit) => {
+            reads.push(limit);
+            return limit < png.length ? { status: 'limit' } : { status: 'downloaded', data: png };
+        },
+        t.signal,
+        () => 0,
+        { budget: 20, maxResource: 8 },
+    );
+    await queue.add(['orphan.png', 'needed.png', 'unused.png'], base);
+    await queue.drain();
+    await queue.recoverBudget((resolve, use) => {
+        const path = resolve('needed.png', base, 'image');
+        assert.ok(path);
+        use(path);
+    });
+    assert.deepEqual(reads, [8, 6, 6, 8]);
+    assert.deepEqual(
+        queue.result().assets.map((asset) => asset.href),
+        ['images/image_2.png'],
+    );
+});
+
+for (const settled of [false, true]) {
+    test('a later font reference restores a mismatched resource, settled=' + settled, async (t) => {
+        const gate = Promise.withResolvers<void>();
+        const cooling = Promise.withResolvers<void>();
+        let fetches = 0;
+        const queue = createAssetQueue(
+            async () => {
+                fetches++;
+                await gate.promise;
+                return { status: 'downloaded', data: new TextEncoder().encode('wOF2xxxx') };
+            },
+            t.signal,
+            () => {
+                cooling.resolve();
+                return 0;
+            },
+        );
+        await queue.add([{ value: 'shared', kind: 'image' }], base);
+        if (settled) {
+            gate.resolve();
+            await cooling.promise;
+        }
+        await queue.add(
+            [
+                { value: 'shared', kind: 'font' },
+                { value: 'shared', kind: 'font' },
+            ],
+            base,
+        );
+        gate.resolve();
+        await queue.drain();
+        assert.equal(fetches, settled ? 2 : 1);
+        assert.equal(queue.path('shared', base, 'font'), '../images/image_1.woff2');
+        assert.equal(queue.path('shared', base, 'image'), undefined);
+        assert.equal(queue.result().missingReferences, 1);
+    });
+}

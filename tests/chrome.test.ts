@@ -350,7 +350,11 @@ try {
         const fail = failSecondChapter && api === 'e_0' && chapterId === wereadE('2');
         const encoded =
             chapterId === wereadE('2') ? second : chapterId === wereadE('3') ? third : first;
-        const shard = api === 'e_2' ? style : encoded[paths.indexOf(api)];
+        const styleResponse =
+            (stress && !benchmark) || (!metricsRun && chapterId === wereadE('1'))
+                ? 'x'.repeat(33)
+                : style;
+        const shard = api === 'e_2' ? styleResponse : encoded[paths.indexOf(api)];
         const body = url.pathname.startsWith('/web/reader/')
             ? '<title>Fixture Book - Fixture Author - \u5fae\u4fe1\u8bfb\u4e66</title><script>window.__INITIAL_STATE__={"reader":{"bookInfo":{"bookId":"42","title":"Fixture Book","language":"en-US"},"psvts":"test"}};(function(){});</script>'
             : (shard ??
@@ -589,7 +593,10 @@ try {
         const usedResourceBytes = resources.reduce((sum, row) => sum + Number(row[1]), 0);
         if (stress && !benchmark) {
             // The queue reserves space for both incoming chunks and a contiguous response.
-            assert.match(String(status), /Resources: 8\. 5 resources unavailable\./);
+            assert.match(
+                String(status),
+                /Resources: 8\. The book stylesheet could not be loaded\. 5 resources unavailable\./,
+            );
             assert.equal(network.held.requests.size, 13);
             assert.equal(network.held.requests.get('wrong-kind.png'), 1);
             assert.equal(network.held.peak <= 4, true);

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.7 - 2026-11-28
+
+- Reclaim space from unused resources before retrying budget-limited downloads. Reevaluate a previously mismatched resource when a later chapter uses its actual type.
+- Show a single warning when the book stylesheet cannot be retrieved or decoded. Clear it when a later chapter supplies the stylesheet.
+
 ## v0.4.6 - 2026-11-28
 
 ### Fixed

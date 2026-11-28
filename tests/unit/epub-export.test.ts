@@ -460,11 +460,11 @@ test('buildEpub stores images without compression and lists them in the manifest
         title: 'Book',
         author: '',
         now: 1756500000000,
+        assets: [{ href: 'images/pic.png', mediaType: 'image/png', data: png }],
         chapters: [
             {
                 title: 'Chapter',
                 source: '<p>x</p><div class="bodyPic"><img src="../images/pic.png" alt="Sample"/></div>',
-                assets: [{ href: 'images/pic.png', mediaType: 'image/png', data: png }],
             },
         ],
         css: '',
@@ -576,8 +576,8 @@ test('createEbookExport reads the page source before requesting the catalog', as
             'the book ID comes from the page source',
         );
         assert.ok(
-            ex.viewState().title.includes('e_0'),
-            'the export stops on an empty shard: ' + ex.viewState().title,
+            ex.viewState().message.includes('e_0'),
+            'the export stops on an empty shard: ' + ex.viewState().message,
         );
     } finally {
         globalThis.fetch = originalFetch;
@@ -625,7 +625,7 @@ test('createEbookExport renews and retries empty shards and explains how to reco
             },
             chapterDelayMs: () => 0,
             shardDelayMs: () => 0,
-            imageDelayMs: () => 0,
+            resourceDelayMs: () => 0,
             emptyRetryDelaysMs: [1, 1],
         });
         ex.toggle();
@@ -640,8 +640,10 @@ test('createEbookExport renews and retries empty shards and explains how to reco
         assert.ok(
             ex
                 .viewState()
-                .title.includes('Your session may have expired or WeRead may be limiting requests'),
-            'the error explains how to recover: ' + ex.viewState().title,
+                .message.includes(
+                    'Your session may have expired or WeRead may be limiting requests',
+                ),
+            'the error explains how to recover: ' + ex.viewState().message,
         );
     } finally {
         globalThis.fetch = originalFetch;
@@ -674,10 +676,10 @@ test('createEbookExport reports non-JSON chapterInfos responses', async () => {
         ex.toggle();
         await new Promise((resolve) => setTimeout(resolve, 30));
         assert.ok(
-            ex.viewState().title.includes('Could not parse the chapterInfos response'),
-            'error message: ' + ex.viewState().title,
+            ex.viewState().message.includes('Could not parse the chapterInfos response'),
+            'error message: ' + ex.viewState().message,
         );
-        assert.doesNotMatch(ex.viewState().title, /Blocked by gateway/);
+        assert.doesNotMatch(ex.viewState().message, /Blocked by gateway/);
     } finally {
         globalThis.fetch = originalFetch;
     }
@@ -877,4 +879,20 @@ test('access errors distinguish signing in from book permission without exposing
             /denied access/.test(error.message) &&
             !error.message.includes('private response text'),
     );
+});
+
+test('stylesheet requests distinguish empty styles, retrieval failures, bad checksums and cancellation', async (t) => {
+    const controller = new AbortController();
+    const client = createWeReadClient(controller.signal, 1000, [], () => 0);
+    const book = { bookId: '42', title: 'Test', author: '', psvts: '1' };
+    const chapter = { chapterUid: 1 };
+    let response = new Response('');
+    t.mock.method(globalThis, 'fetch', async () => response);
+    assert.deepEqual(await client.css(book, chapter), { status: 'ok', css: '' });
+    response = new Response('private response', { status: 503 });
+    assert.deepEqual(await client.css(book, chapter), { status: 'request' });
+    response = new Response('x'.repeat(33));
+    assert.deepEqual(await client.css(book, chapter), { status: 'decode' });
+    controller.abort();
+    await assert.rejects(client.css(book, chapter), { name: 'AbortError' });
 });

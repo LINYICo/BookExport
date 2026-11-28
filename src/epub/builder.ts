@@ -1,7 +1,7 @@
 import { chapterFileName, escapeXml, languageTag, makeChapterXhtml } from './document.ts';
 import { buildZip, type ZipEntry } from './zip.ts';
 
-export interface EpubImage {
+export interface EpubAsset {
     href: string;
     mediaType: string;
     data: Uint8Array<ArrayBuffer>;
@@ -10,7 +10,6 @@ export interface EpubImage {
 export interface EpubChapter {
     title: string;
     source: string;
-    assets?: EpubImage[];
     properties?: readonly ('svg' | 'mathml')[];
     embeddedCss?: string;
     language?: string;
@@ -105,7 +104,7 @@ export async function buildEpub({
     css: string;
     now: number;
     signal?: AbortSignal;
-    assets?: EpubImage[];
+    assets?: EpubAsset[];
 }) {
     const encoder = new TextEncoder();
     const bookUuid = 'urn:uuid:' + crypto.randomUUID();
@@ -120,11 +119,6 @@ export async function buildEpub({
 <head><meta charset="utf-8"/><title>Table of Contents</title></head>
 <body><nav epub:type="toc" id="toc"><h1>Table of Contents</h1>${toc.nav}</nav></body>
 </html>`;
-    const allAssets = new Map(assets.map((asset) => [asset.href, asset]));
-    for (const chapter of chapters)
-        for (const asset of chapter.assets ?? []) {
-            if (!allAssets.has(asset.href)) allAssets.set(asset.href, asset);
-        }
     const chapterItems = chapters
         .map((chapter, i) => {
             const properties = chapter.properties?.length
@@ -134,7 +128,7 @@ export async function buildEpub({
         })
         .join('\n');
     const assetItems = Array.from(
-        allAssets.values(),
+        assets,
         (asset, i) =>
             `<item id="asset_${i + 1}" href="${escapeXml(asset.href)}" media-type="${escapeXml(asset.mediaType)}"/>`,
     ).join('\n');
@@ -182,8 +176,7 @@ ${assetItems}
             name: 'OEBPS/styles/weread.css',
             data: encoder.encode(css || 'body { line-height: 1.6; }\n'),
         };
-        for (const { href, data } of allAssets.values())
-            yield { name: 'OEBPS/' + href, data, compress: false };
+        for (const { href, data } of assets) yield { name: 'OEBPS/' + href, data, compress: false };
         for (const [i, chapter] of chapters.entries()) {
             signal?.throwIfAborted();
             const source = makeChapterXhtml(chapter.title, chapter.source, chapter.embeddedCss, {

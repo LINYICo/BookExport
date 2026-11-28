@@ -182,14 +182,13 @@ export function chapterResources(
     body: Element,
     css: string,
     resolve: ResolveResource,
-    use?: (path: string) => void,
+    use: (path: string) => void,
 ) {
     for (const image of body.querySelectorAll('img, svg image')) {
         const html = image.localName === 'img';
         const attribute = html ? 'src' : image.hasAttribute('href') ? 'href' : 'xlink:href';
         const src = image.getAttribute(attribute);
         const href = resolve(src ?? '', 'image');
-        if (!use) continue;
         if (!html && attribute === 'href') image.removeAttribute('xlink:href');
         if (href) {
             image.setAttribute(attribute, href);
@@ -221,7 +220,7 @@ export function chapterResources(
     for (const element of styled) {
         const text = element.getAttribute('style') ?? '';
         const style = rewriteCss(text, resolve, true, use);
-        if (use) element.setAttribute('style', style);
+        element.setAttribute('style', style);
     }
     for (const element of body.querySelectorAll('svg, svg *')) {
         for (const { name, value } of Array.from(element.attributes)) {
@@ -234,8 +233,8 @@ export function chapterResources(
             if (!escapedPresentation && !/url\s*\(/i.test(value)) continue;
             // Presentation attributes can reference symbols in the same chapter.
             if (/^url\(\s*['"]?#[\w:.-]+['"]?\s*\)$/i.test(value.trim())) continue;
-            if (use) element.removeAttribute(name);
-            else resolve('');
+            element.removeAttribute(name);
+            resolve('');
         }
     }
     return rewriteCss(css, resolve, false, use);

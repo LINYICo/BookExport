@@ -1,4 +1,4 @@
-import { rewriteCss } from './epub/css.ts';
+import { rewriteCss, type ResolveResource } from './epub/css.ts';
 import { createAssetQueue } from './assets.ts';
 import { buildEpub, sanitizeFilename, type EpubChapter } from './epub/builder.ts';
 import {
@@ -8,7 +8,7 @@ import {
     rewriteChapterLinks,
     type ChapterDocument,
 } from './epub/document.ts';
-import { type FetchAsset, type ResourceReference } from './resource.ts';
+import { resourceURL, type FetchAsset, type ResourceReference } from './resource.ts';
 import { createWeReadClient, ExportError, wait } from './weread/client.ts';
 
 type Stage =
@@ -29,7 +29,6 @@ export type ExportView = {
     done: number;
     total: number;
     message: string;
-    title: string;
     warning: string;
 };
 
@@ -38,11 +37,37 @@ interface Options {
     onStateChange?: () => void;
     chapterDelayMs?: () => number;
     shardDelayMs?: () => number;
-    imageDelayMs?: () => number;
-    imageConcurrency?: number;
+    resourceDelayMs?: () => number;
+    resourceConcurrency?: number;
     emptyRetryDelaysMs?: number[];
     requestTimeoutMs?: number;
     fetchAsset?: FetchAsset;
+}
+
+// Run the same rewrite used for packaging so rejected CSS declarations and
+// removed elements cannot reserve bytes. Preserve rejected references for warnings.
+function discoverResources(
+    base: string,
+    rewrite: (resolve: ResolveResource, use: (path: string) => void) => void,
+) {
+    const candidates = new Map<string, ResourceReference>();
+    const references: ResourceReference[] = [];
+    rewrite(
+        (value, kind) => {
+            if (!resourceURL(value, base)) {
+                references.push({ value, kind });
+                return;
+            }
+            const path = '../candidate/' + candidates.size;
+            candidates.set(path, { value, kind });
+            return path;
+        },
+        (path) => {
+            const reference = candidates.get(path);
+            if (reference) references.push(reference);
+        },
+    );
+    return references;
 }
 
 export function createEbookExport({
@@ -50,8 +75,8 @@ export function createEbookExport({
     onStateChange = () => {},
     chapterDelayMs = () => 2000 + Math.floor(Math.random() * 2000),
     shardDelayMs = () => 200 + Math.floor(Math.random() * 200),
-    imageDelayMs = () => 300 + Math.floor(Math.random() * 200),
-    imageConcurrency = 4,
+    resourceDelayMs = () => 300 + Math.floor(Math.random() * 200),
+    resourceConcurrency = 4,
     emptyRetryDelaysMs = [3000, 8000],
     requestTimeoutMs = 20000,
     fetchAsset = async () => ({ status: 'unavailable' }),
@@ -79,7 +104,6 @@ export function createEbookExport({
             total,
             message,
             warning: state.warning ?? '',
-            title: message || 'Save a personal copy of this book as an EPUB',
         };
     }
 
@@ -92,8 +116,8 @@ export function createEbookExport({
             emptyRetryDelaysMs,
             shardDelayMs,
         );
-        const queue = createAssetQueue(fetchAsset, signal, imageDelayMs, {
-            concurrency: imageConcurrency,
+        const queue = createAssetQueue(fetchAsset, signal, resourceDelayMs, {
+            concurrency: resourceConcurrency,
         });
         let result: State;
         done = 0;
@@ -111,6 +135,7 @@ export function createEbookExport({
             const parentIndices = new Map<string, number>();
             let retainedText = 0;
             let css = '';
+            let stylesheetMissing = false;
             let cssBase = readerUrl;
             total = catalog.length;
             update({ stage: 'chapters', message: 'Downloading chapters' });
@@ -137,11 +162,6 @@ export function createEbookExport({
                         'A chapter has no exportable content. Refresh the reader and retry.',
                     );
 
-                const references: ResourceReference[] = [];
-                chapterResources(body, parsed.embeddedCss, (value, kind) => {
-                    references.push({ value, kind });
-                    return value;
-                });
                 const markup = serializer.serializeToString(body);
                 retainedText += (markup.length + parsed.embeddedCss.length) * 2;
                 if (retainedText > 96 * 1024 * 1024)
@@ -158,15 +178,21 @@ export function createEbookExport({
                 parentIndices.set(String(Number(chapter.chapterUid)), done);
                 done = chapters.length;
                 onStateChange();
+                const references = discoverResources(parsed.base, (resolve, use) =>
+                    chapterResources(body, parsed.embeddedCss, resolve, use),
+                );
                 await queue.add(references, parsed.base);
                 if (!css) {
-                    css = await client.css(book, chapter);
+                    const style = await client.css(book, chapter);
+                    if (style.status !== 'ok') stylesheetMissing = true;
+                    else if (style.css) {
+                        css = style.css;
+                        stylesheetMissing = false;
+                    }
                     cssBase = parsed.base;
-                    const styles: ResourceReference[] = [];
-                    rewriteCss(css, (value, kind) => {
-                        styles.push({ value, kind });
-                        return value;
-                    });
+                    const styles = discoverResources(cssBase, (resolve, use) =>
+                        rewriteCss(css, resolve, false, use),
+                    );
                     await queue.add(styles, cssBase);
                 }
             }
@@ -179,6 +205,23 @@ export function createEbookExport({
 
             update({ stage: 'packaging', message: 'Packaging EPUB…' });
             const parser = new DOMParser();
+            await queue.recoverBudget(async (resolve, use) => {
+                for (const [index, chapter] of chapters.entries()) {
+                    signal.throwIfAborted();
+                    const body = parser.parseFromString(
+                        chapter.markup,
+                        'application/xhtml+xml',
+                    ).documentElement;
+                    chapterResources(
+                        body,
+                        chapter.embeddedCss,
+                        (value, kind) => resolve(value, chapter.base, kind),
+                        use,
+                    );
+                    if (index % 16 === 0) await scheduler.yield();
+                }
+                rewriteCss(css, (value, kind) => resolve(value, cssBase, kind), false, use);
+            });
             const outputSerializer = serializer ?? new XMLSerializer();
             const documents = chapterIndex(chapters);
             const completed: EpubChapter[] = [];
@@ -257,6 +300,7 @@ export function createEbookExport({
                 setTimeout(() => URL.revokeObjectURL(url), 10000);
             }
             const warning = [
+                stylesheetMissing ? 'The book stylesheet could not be loaded.' : '',
                 unavailable ? unavailable + ' resources unavailable.' : '',
                 omitted ? 'Some unsupported resource references were removed.' : '',
             ]

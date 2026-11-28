@@ -230,9 +230,7 @@ export function createWeReadClient(
             let code = '';
             try {
                 code = String(record(JSON.parse(text)).errcode || '');
-            } catch {
-                /* Report the raw response. */
-            }
+            } catch {}
             if (code === '-2012') throw new ShardError('Session expired (-2012)', 'auth');
             throw new ExportError(
                 'WeRead rejected the chapter request' +
@@ -315,13 +313,17 @@ export function createWeReadClient(
             }
         },
         async css(book: Book, chapter: Chapter) {
+            let text: string;
             try {
-                return decodeStyleShard(
-                    await shard('/web/book/chapter/e_2', params(book, chapter, true)),
-                );
+                text = await shard('/web/book/chapter/e_2', params(book, chapter, true));
             } catch {
                 signal.throwIfAborted();
-                return '';
+                return { status: 'request' } as const;
+            }
+            try {
+                return { status: 'ok', css: decodeStyleShard(text).trim() } as const;
+            } catch {
+                return { status: 'decode' } as const;
             }
         },
     };

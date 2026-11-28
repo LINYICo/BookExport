@@ -1,4 +1,4 @@
-import { type EpubImage } from './epub/builder.ts';
+import { type EpubAsset } from './epub/builder.ts';
 import { imageExtensionAndType } from './epub/document.ts';
 import {
     resourceLimit,
@@ -29,7 +29,9 @@ type Job = {
     index: number;
     references: Map<ResourceKind | undefined, number>;
     status?: ResourceFailure | 'downloaded';
-    asset?: EpubImage;
+    asset?: EpubAsset;
+    mismatchedType?: string;
+    limitedAt?: number;
 };
 
 function matchesKind(mediaType: string, kind?: ResourceKind) {
@@ -39,7 +41,7 @@ function matchesKind(mediaType: string, kind?: ResourceKind) {
 export function createAssetQueue(
     fetchAsset: FetchAsset,
     signal: AbortSignal,
-    imageDelayMs: () => number,
+    resourceDelayMs: () => number,
     { concurrency = 4, budget = defaultBudget, maxResource = resourceLimit } = {},
 ) {
     const jobs = new Map<string, Job>();
@@ -65,6 +67,7 @@ export function createAssetQueue(
             if (!job) return;
             if (limit <= 0) {
                 job.status = 'limit';
+                job.limitedAt = 0;
                 continue;
             }
             // Allow both the response chunks and the outgoing contiguous buffer in the budget.
@@ -93,9 +96,10 @@ export function createAssetQueue(
                     ![...job.references.keys()].some((expected) =>
                         matchesKind(kind.mediaType, expected),
                     )
-                )
+                ) {
+                    if (kind) job.mismatchedType = kind.mediaType;
                     job.status = 'unsupported';
-                else {
+                } else {
                     job.status = 'downloaded';
                     retained += result.data.length;
                     job.asset = {
@@ -108,9 +112,10 @@ export function createAssetQueue(
         } catch {
             job.status = signal.aborted ? 'cancelled' : 'unavailable';
         } finally {
+            if (job.status === 'limit' && limit < maxResource) job.limitedAt = limit;
             reserved -= reservation;
         }
-        if (!pacing.aborted) await wait(imageDelayMs(), pacing).catch(() => {});
+        if (!pacing.aborted) await wait(resourceDelayMs(), pacing).catch(() => {});
     }
 
     async function add(values: Iterable<string | ResourceReference>, base: string) {
@@ -134,14 +139,21 @@ export function createAssetQueue(
             }
             const existing = jobs.get(url);
             if (existing) {
+                const newKind = !existing.references.has(kind);
                 existing.references.set(kind, (existing.references.get(kind) ?? 0) + 1);
-                continue;
+                if (
+                    !newKind ||
+                    !existing.mismatchedType ||
+                    !matchesKind(existing.mismatchedType, kind)
+                )
+                    continue;
+                delete existing.mismatchedType;
             }
             while (pending.length >= maxPending && active.size) {
                 await Promise.race(active);
                 signal.throwIfAborted();
             }
-            const job = { url, index: jobs.size + 1, references: new Map([[kind, 1]]) };
+            const job = existing ?? { url, index: jobs.size + 1, references: new Map([[kind, 1]]) };
             jobs.set(url, job);
             pending.push(job);
             pump();
@@ -162,7 +174,7 @@ export function createAssetQueue(
     }
 
     function result(usedPaths?: ReadonlySet<string>) {
-        const assets: EpubImage[] = [];
+        const assets: EpubAsset[] = [];
         const failures = new Map<ResourceFailure, number>();
         if (rejected.size) failures.set('policy', rejected.size);
         let missingReferences = omitted;
@@ -202,5 +214,38 @@ export function createAssetQueue(
             }
     }
 
-    return { add, drain, path, result, discardUnused };
+    // Only under budget pressure, resolve the whole book with limited jobs treated
+    // as available. This protects dependencies that a successful retry could restore.
+    async function recoverBudget(
+        scan: (resolve: typeof path, use: (path: string) => void) => void | Promise<void>,
+    ) {
+        if (![...jobs.values()].some((job) => job.limitedAt !== undefined)) return;
+        const used = new Set<string>();
+        await scan(
+            (value, base, kind) => {
+                const url = resourceURL(value, base);
+                const job = url && jobs.get(url);
+                if (job && job.limitedAt !== undefined) return '../pending/' + job.index;
+                return path(value, base, kind);
+            },
+            (href) => used.add(href),
+        );
+        const before = retained;
+        discardUnused(used);
+        if (retained === before) return;
+        for (const job of jobs.values()) {
+            const limit = Math.min(maxResource, Math.floor((budget - retained) / 2));
+            if (
+                job.limitedAt === undefined ||
+                limit <= job.limitedAt ||
+                !used.has('../pending/' + job.index)
+            )
+                continue;
+            await wait(resourceDelayMs(), signal);
+            await download(job, limit, 0);
+            signal.throwIfAborted();
+        }
+    }
+
+    return { add, drain, path, result, discardUnused, recoverBudget };
 }
