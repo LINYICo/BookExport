@@ -12,7 +12,7 @@ BookExport downloads WeRead books as EPUB files with chapters, a table of conten
 
 Sign in to WeRead, open a book, and click **BookExport** in the toolbar. Select **Download EPUB**. You can close the panel and reopen it to check progress or cancel. Keep the reader tab open until the EPUB is sent to the browser's downloads.
 
-BookExport supports EPUB-format books and keeps a placeholder for any unavailable image. Export only books you have permission to save.
+BookExport supports EPUB-format books. It reports unavailable resources and shows placeholders for missing images. It downloads resources directly from supported WeRead and CDN hosts and skips redirects. Export only books you have permission to save.
 
 ## Development
 
@@ -34,9 +34,9 @@ pnpm check
 pnpm release
 ```
 
-Load `dist/extension/` to test the build. Watch mode rebuilds source and copies changes to the manifest and icons. Unit and Chrome tests validate the EPUB files they produce with EPUBCheck. The Chrome test uses a temporary profile and synthetic reader responses. Set `CHROME_BIN` or `EPUBCHECK_BIN` to override their executable paths. Use [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) in an isolated stable Chrome profile for interactive debugging.
+Load `dist/extension/` to test the build. Watch mode rebuilds source and copies changes to the manifest and icons. Unit and Chrome tests validate the EPUB files they produce with EPUBCheck. The Chrome test uses a temporary profile, synthetic reader responses, and an OpenSSL-backed local HTTPS server to exercise real resource requests. Packaging uses `zip` and `unzip`. Set `CHROME_BIN` or `EPUBCHECK_BIN` to override their executable paths. Use [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) in an isolated stable Chrome profile for interactive debugging.
 
-Run `pnpm check` before publishing. Run `pnpm release` to create the installable ZIP under `dist/`. Update the package and manifest versions together and record changes in [RELEASE.md](RELEASE.md).
+Run `pnpm check` before publishing. Run `pnpm release` to create the installable ZIP under `dist/`. Update the version in `package.json` and record changes in [RELEASE.md](RELEASE.md).
 
 ## License
 

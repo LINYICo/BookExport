@@ -1,5 +1,24 @@
 # Release history
 
+## v0.4.1 - 2026-11-28
+
+### Changed
+
+- Download chapter resources in parallel through a bounded queue and reuse resources across chapters.
+- Release chapter documents sooner and bound memory used by chapter text and downloaded resources.
+- Preserve EPUB language, nested contents, internal links, SVG, and MathML.
+- Report unavailable resources when handing the EPUB off to Chrome.
+
+### Fixed
+
+- Cancel pending and active work when a download is cancelled or the reader navigates.
+- Normalize filenames and validate EPUB ZIP entries.
+
+### Security
+
+- Allow direct requests to approved resource hosts without credentials and reject redirects.
+- Enforce response size limits and remove unsafe markup and styles.
+
 ## v0.4.0 - 2026-11-28
 
 ### Changed

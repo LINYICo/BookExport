@@ -20,20 +20,35 @@ export interface ZipEntry {
     compress?: boolean;
 }
 
-export async function buildZip(entries: ZipEntry[], now: number, signal?: AbortSignal) {
-    if (entries.length >= 0xffff) throw new Error('Too many files for a standard ZIP archive.');
+export async function buildZip(entries: Iterable<ZipEntry>, now: number, signal?: AbortSignal) {
+    if (Array.isArray(entries) && entries.length >= 0xffff)
+        throw new Error('Too many files for a standard ZIP archive.');
     const encoder = new TextEncoder();
     const date = new Date(now);
+    if (Number.isNaN(date.getTime())) throw new Error('Invalid ZIP date.');
+    const names = new Set<string>();
     const dosTime =
         (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
     const dosDate =
-        (((date.getFullYear() - 1980) & 0x7f) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+        ((Math.min(127, Math.max(0, date.getFullYear() - 1980)) & 0x7f) << 9) |
+        ((date.getMonth() + 1) << 5) |
+        date.getDate();
 
     const chunks: BlobPart[] = [];
     const centrals: Uint8Array<ArrayBuffer>[] = [];
     let offset = 0;
     for (const entry of entries) {
         signal?.throwIfAborted();
+        if (centrals.length >= 0xfffe)
+            throw new Error('Too many files for a standard ZIP archive.');
+        if (
+            /[\p{Cc}\\:]/u.test(entry.name) ||
+            entry.name.split('/').some((part) => !part || part === '.' || part === '..')
+        ) {
+            throw new Error('Invalid ZIP entry path.');
+        }
+        if (names.has(entry.name)) throw new Error('Duplicate ZIP entry path: ' + entry.name);
+        names.add(entry.name);
         const nameBytes = encoder.encode(entry.name);
         if (nameBytes.length > 0xffff || entry.data.length >= 0xffffffff)
             throw new Error('A file exceeds the ZIP size limit.');
@@ -42,12 +57,26 @@ export async function buildZip(entries: ZipEntry[], now: number, signal?: AbortS
         let fileData = entry.data;
         if (entry.compress !== false && entry.data.length > 0) {
             method = 8;
-            const stream = new Blob([entry.data])
-                .stream()
-                .pipeThrough(new CompressionStream('deflate-raw'), signal ? { signal } : {});
+            const data = entry.data;
+            const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
+                start(controller) {
+                    controller.enqueue(data);
+                    controller.close();
+                },
+            });
+            const stream = source.pipeThrough(
+                new CompressionStream('deflate-raw'),
+                signal ? { signal } : {},
+            );
             fileData = new Uint8Array(await new Response(stream).arrayBuffer());
         }
 
+        signal?.throwIfAborted();
+        if (
+            fileData.length >= 0xffffffff ||
+            offset + 30 + nameBytes.length + fileData.length >= 0xffffffff
+        )
+            throw new Error('The EPUB exceeds the ZIP size limit.');
         const local = new Uint8Array(30 + nameBytes.length);
         const localView = new DataView(local.buffer);
         localView.setUint32(0, 0x04034b50, true);
@@ -81,10 +110,11 @@ export async function buildZip(entries: ZipEntry[], now: number, signal?: AbortS
         centrals.push(central);
 
         offset += local.length + fileData.length;
-        if (offset >= 0xffffffff) throw new Error('The EPUB exceeds the ZIP size limit.');
     }
 
     const centralSize = centrals.reduce((sum, c) => sum + c.length, 0);
+    if (offset + centralSize + 22 >= 0xffffffff)
+        throw new Error('The EPUB exceeds the ZIP size limit.');
     const eocd = new Uint8Array(22);
     const eocdView = new DataView(eocd.buffer);
     eocdView.setUint32(0, 0x06054b50, true);
@@ -93,8 +123,6 @@ export async function buildZip(entries: ZipEntry[], now: number, signal?: AbortS
     eocdView.setUint32(12, centralSize, true);
     eocdView.setUint32(16, offset, true);
 
-    if (offset + centralSize + eocd.length >= 0xffffffff)
-        throw new Error('The EPUB exceeds the ZIP size limit.');
     signal?.throwIfAborted();
     return new Blob([...chunks, ...centrals, eocd], { type: 'application/epub+zip' });
 }

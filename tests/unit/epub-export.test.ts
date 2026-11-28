@@ -368,6 +368,7 @@ test('buildEpub produces an EPUB readable as a standard ZIP archive', async () =
     const archive = await validatedEpub({
         title: 'Test Book',
         author: 'Test Author',
+        language: 'zh-cn',
         chapters: [
             { title: 'Chapter One', source: '<p>First chapter text</p>' },
             {
@@ -674,10 +675,7 @@ test('createEbookExport reports non-JSON chapterInfos responses', async () => {
             ex.viewState().title.includes('Could not parse the chapterInfos response'),
             'error message: ' + ex.viewState().title,
         );
-        assert.ok(
-            ex.viewState().title.includes('Blocked by gateway'),
-            'includes a response excerpt',
-        );
+        assert.doesNotMatch(ex.viewState().title, /Blocked by gateway/);
     } finally {
         globalThis.fetch = originalFetch;
     }
@@ -712,13 +710,8 @@ test(
         t.mock.method(globalThis, 'fetch', async (url: string) => {
             calls.push(url);
             if (url.endsWith('/e_0')) {
-                return {
-                    ok: true,
-                    text: async (): Promise<string> => {
-                        firstShard.resolve();
-                        return '{}';
-                    },
-                };
+                firstShard.resolve();
+                return new Response('{}');
             }
             return new Response(url.endsWith('/chapterInfos') ? catalog : readerHtml);
         });
@@ -784,7 +777,14 @@ for (const step of ['reader request', 'chapter response body']) {
                     }
                     if (url.endsWith('/chapterInfos')) return new Response(catalog);
                     assert.ok(url.endsWith('/e_0'));
-                    return { ok: true, text: () => waitForAbort(signal) };
+                    pendingSignals.push(signal);
+                    return new Response(
+                        new ReadableStream({
+                            start(controller) {
+                                controller.enqueue(new TextEncoder().encode('first chunk'));
+                            },
+                        }),
+                    );
                 },
             );
 
@@ -821,4 +821,30 @@ test('ZIP rejects overflow and respects cancellation', async () => {
     await assert.rejects(buildZip([entry], Date.now(), AbortSignal.abort()), {
         name: 'AbortError',
     });
+});
+
+test('ZIP rejects duplicate and unsafe paths before writing an archive', async () => {
+    const entry = { name: 'a.txt', data: new Uint8Array() };
+    await assert.rejects(buildZip([entry, entry], Date.now()), /Duplicate ZIP entry/);
+    for (const name of ['../x', 'a/../../x', '/x', 'a\\b', 'c:x', 'a//b']) {
+        await assert.rejects(buildZip([{ ...entry, name }], Date.now()), /Invalid ZIP entry/);
+    }
+});
+
+test('filenames handle reserved names, extensions, and Unicode byte boundaries', () => {
+    assert.equal(sanitizeFilename('CON.epub'), '_CON');
+    assert.equal(sanitizeFilename('COM1 .note'), '_COM1 .note');
+    assert.equal(sanitizeFilename('Name...  '), 'Name');
+    assert.equal(sanitizeFilename('Name.EPUB.epub'), 'Name');
+    const long = sanitizeFilename('\u{1f4d6}'.repeat(100));
+    assert.equal(Buffer.byteLength(long), 248);
+    assert.equal(Array.from(long).length, 62);
+});
+
+test('ZIP cancels while compressing a large entry', async () => {
+    const job = new AbortController();
+    const bytes = new Uint8Array(24 * 1024 * 1024);
+    const archive = buildZip([{ name: 'chapter.xhtml', data: bytes }], Date.now(), job.signal);
+    setImmediate(() => job.abort());
+    await assert.rejects(archive, { name: 'AbortError' });
 });

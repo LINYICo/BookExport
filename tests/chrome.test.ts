@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { Readable, Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { resourceServer } from './fixtures/resource-server.ts';
 import { EPUB_SHARDS, CSS_SHARD } from './fixtures/epub-shards.ts';
 
 const workspace = await mkdtemp(join(tmpdir(), 'bookexport-test-'));
 const profile = join(workspace, 'profile');
 const downloadPath = join(workspace, 'downloads');
 await mkdir(downloadPath);
+const network = await resourceServer(workspace);
 const executable =
     process.env.CHROME_BIN ||
     (process.platform === 'darwin'
@@ -21,6 +23,7 @@ const chrome = spawn(
     executable,
     [
         '--headless',
+        ...network.args,
         '--no-first-run',
         '--no-default-browser-check',
         '--enable-unsafe-extension-debugging',
@@ -110,6 +113,14 @@ chrome.on('exit', (code) => {
         );
     calls.clear();
 });
+async function until(predicate: () => boolean, message: string) {
+    for (let i = 0; i < 100; i++) {
+        if (predicate()) return;
+        await delay(100);
+    }
+    assert.fail(message);
+}
+
 async function waitFor(predicate: string, sessionId: string) {
     for (let i = 0; i < 80; i++) {
         const { result } = await send<Evaluation>(
@@ -122,7 +133,7 @@ async function waitFor(predicate: string, sessionId: string) {
     }
     throw new Error('Timed out: ' + predicate);
 }
-const timeout = setTimeout(() => chrome.kill(), 45000);
+const timeout = setTimeout(() => chrome.kill(), 75000);
 try {
     const { id: extension } = await send<{ id: string }>('Extensions.loadUnpacked', {
         path: resolve('dist/extension'),
@@ -169,6 +180,7 @@ try {
     );
     const scriptReady = Promise.withResolvers<number>();
     const unhandled: unknown[] = [];
+    const consoleMessages: unknown[] = [];
     events.push(({ method, params, sessionId: eventSession }) => {
         if (
             method === 'Debugger.scriptParsed' &&
@@ -178,6 +190,7 @@ try {
         ) {
             scriptReady.resolve(params.executionContextId);
         }
+        if (method === 'Runtime.consoleAPICalled') consoleMessages.push(params);
         if (method === 'Runtime.exceptionThrown') unhandled.push(params.exceptionDetails);
     });
     await send('Runtime.enable', {}, sessionId);
@@ -190,7 +203,8 @@ try {
         ['e_2', CSS_SHARD],
     ]);
     let holdFirstShard = true;
-    const png = (await readFile('public/icons/icon48.png')).toString('base64');
+    let chapterEnds = 0;
+    let overlapped = false;
     let heldShard = Promise.withResolvers<void>();
     let abortedShard = Promise.withResolvers<boolean>();
     let heldURL: string | undefined;
@@ -213,6 +227,9 @@ try {
         }
         if (method !== 'Fetch.requestPaused') return;
         const url = new URL(params.request.url);
+        if (url.pathname.endsWith('/e_3') && ++chapterEnds === 2) {
+            overlapped = network.held.requests.has('shared.png');
+        }
         if (holdFirstShard && url.pathname.endsWith('/e_0')) {
             assert.ok(params.networkId);
             heldRequests.add(params.networkId);
@@ -221,7 +238,7 @@ try {
             return;
         }
         const body = url.pathname.startsWith('/web/reader/')
-            ? '<title>Fixture Book - Fixture Author - \u5fae\u4fe1\u8bfb\u4e66</title><script>window.__INITIAL_STATE__={"reader":{"bookInfo":{"bookId":"42","title":"Fixture Book"},"psvts":"test"}};(function(){});</script>'
+            ? '<title>Fixture Book - Fixture Author - \u5fae\u4fe1\u8bfb\u4e66</title><script>window.__INITIAL_STATE__={"reader":{"bookInfo":{"bookId":"42","title":"Fixture Book","language":"en-US"},"psvts":"test"}};(function(){});</script>'
             : (chapterResponses.get(url.pathname.split('/').at(-1) ?? '') ??
               JSON.stringify({
                   data: [
@@ -232,10 +249,11 @@ try {
                                   chapterUid: '1',
                                   title: '\u7248\u6743\u4fe1\u606f',
                                   wordCount: 100,
-                                  href: '/book-source/chapter/first.xhtml',
+                                  href: 'https://assets.weread.qq.com/book-source/chapter/first.xhtml',
                               },
                               {
                                   chapterUid: '2',
+                                  parentChapterUid: '1',
                                   wordCount: 100,
                               },
                           ],
@@ -290,45 +308,25 @@ try {
         flatten: true,
     });
     await send('Runtime.enable', {}, worker);
-    const mockedImages = await send<Evaluation>(
-        'Runtime.evaluate',
-        {
-            expression: `(() => {
-            globalThis.images = { held: true, active: 0, peak: 0, aborted: 0, shared: 0 };
-            globalThis.fetch = async (url, { signal }) => {
-                const stats = globalThis.images;
-                const name = url.pathname.split('/').at(-1);
-                stats.active++;
-                stats.peak = Math.max(stats.active, stats.peak);
-                if (name === 'shared.png') stats.shared++;
-                try {
-                    await new Promise((resolve, reject) => {
-                        const timer = stats.held ? undefined : setTimeout(() => {
-                            signal.removeEventListener('abort', cancel);
-                            resolve();
-                        }, 180);
-                        function cancel() {
-                            clearTimeout(timer);
-                            stats.aborted++;
-                            reject(signal.reason);
-                        }
-                        signal.addEventListener('abort', cancel, { once: true });
-                    });
-                    const options = name === 'oversize.png' ? { headers: { 'content-length': '16777217' } } : {};
-                    const response = name === 'missing.png' ? new Response(null, {status: 404})
-                        : new Response(Uint8Array.fromBase64('${png}'), options);
-                    Object.defineProperty(response, 'url', { value: name === 'shared.png'
-                        ? 'https://images.myqcloud.com/shared.png' : url.href });
-                    return response;
-                } finally {
-                    stats.active--;
-                }
-            };
-        })()`,
-        },
-        worker,
-    );
-    assert.equal(mockedImages.exceptionDetails, undefined);
+    let workerReady: Evaluation | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+        workerReady = await send<Evaluation>(
+            'Runtime.evaluate',
+            {
+                expression: `(async () => {
+                    const tabs = await chrome.tabs.query({});
+                    return tabs.some((tab) => tab.url === 'https://weread.qq.com/web/reader/fixture')
+                        && chrome.action.onClicked.hasListeners();
+                })()`,
+                returnByValue: true,
+                awaitPromise: true,
+            },
+            worker,
+        );
+        if (workerReady.result.value === true) break;
+        await delay(100);
+    }
+    assert.equal(workerReady?.result.value, true, JSON.stringify(workerReady));
     function action() {
         return send('Extensions.triggerAction', { id: extension, targetId: reader });
     }
@@ -360,7 +358,9 @@ try {
             }
             await delay(100);
         }
-        throw Error('Panel not found: ' + selector);
+        throw Error(
+            'Panel not found: ' + selector + '\n' + JSON.stringify({ unhandled, consoleMessages }),
+        );
     }
     async function inspectPanel(selector: string, code: string) {
         const objectId = await panelNode(selector);
@@ -430,17 +430,26 @@ try {
 
     holdFirstShard = false;
     await inspectPanel('.download-button', 'function() { this.click(); }');
-    await waitFor('globalThis.images.active === 4', worker);
+    await until(() => network.held.active === 4, 'waiting for four held downloads');
+    const cancelStarted = performance.now();
     await inspectPanel('.download-button', 'function() { this.click(); }');
     await matchPanel('#status', "function() { return this.textContent === 'Export cancelled'; }");
-    await waitFor('globalThis.images.aborted === 4 && globalThis.images.active === 0', worker);
-    await send(
-        'Runtime.evaluate',
-        {
-            expression: 'Object.assign(globalThis.images, { held: false, peak: 0, shared: 0 })',
-        },
-        worker,
+    await until(
+        () => network.held.aborted === 4 && network.held.active === 0,
+        'waiting for sockets to close',
     );
+    console.log(
+        'Resource cancellation took ' + Math.round(performance.now() - cancelStarted) + ' ms.',
+    );
+    assert.equal(
+        Array.from(network.held.requests.values()).reduce((a, b) => a + b, 0),
+        4,
+    );
+    network.held.requests.clear();
+    network.held.hold = false;
+    network.held.peak = 0;
+    chapterEnds = 0;
+    overlapped = false;
     await inspectPanel(
         'progress',
         `function() {
@@ -481,15 +490,28 @@ try {
     const chapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0001.xhtml'], {
         encoding: 'utf8',
     });
-    const imageRequests = await send<Evaluation>(
-        'Runtime.evaluate',
-        {
-            expression: '({ shared: globalThis.images.shared, peak: globalThis.images.peak })',
-            returnByValue: true,
-        },
-        worker,
+    assert.equal(
+        network.held.requests.get('shared.png'),
+        1,
+        'One request for a resource shared by chapters and CSS',
     );
-    assert.deepEqual(imageRequests.result.value, { shared: 1, peak: 4 });
+    assert.equal(
+        network.held.requests.get('direct.png'),
+        1,
+        'An approved CDN may be addressed directly',
+    );
+    assert.equal(
+        network.held.requests.has('redirect-target.png'),
+        false,
+        'Cross-origin redirects must not be followed',
+    );
+    assert.equal(network.held.credentials, 0);
+    assert.ok(
+        network.held.streamed > 16 * 1024 * 1024,
+        'Exercise the streaming limit without Content-Length',
+    );
+    assert.equal(network.held.peak, 4);
+    assert.equal(overlapped, true, 'Resources start before the final chapter response');
     assert.equal(
         await inspectPanel('progress', 'function() { return this.dataset.completed; }'),
         'yes',
@@ -507,8 +529,24 @@ try {
     assert.match(chapter, /<style>[^<]*embedded[^<]*\.\.\/images\/image_1\.png/);
     assert.match(chapter, /style="[^"]*\.\.\/images\/image_1\.png/);
     assert.ok(chapter.includes('[Illustration: Oversized image]'));
+    assert.ok(chapter.includes('[Illustration: Approved redirect]'));
+    assert.ok(chapter.includes('[Illustration: Blocked redirect]'));
+    assert.ok(chapter.includes('class="original-layout"'));
+    assert.ok(chapter.includes('lang="en-US"'));
+    assert.equal(Array.from(chapter.matchAll(/<h1(?:\s[^>]*)?>/g)).length, 1);
+    assert.doesNotMatch(chapter, /denied\.invalid|<animate/);
+    assert.match(
+        String(await inspectPanel('#status', 'function() { return this.textContent; }')),
+        /9 resources unavailable/,
+    );
     const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
     assert.ok(opf.includes('properties="svg mathml"'));
+    assert.ok(opf.includes('<dc:language>en-US</dc:language>'));
+    const nav = execFileSync('unzip', ['-p', file, 'OEBPS/nav.xhtml'], { encoding: 'utf8' });
+    assert.match(
+        nav,
+        /chapter_0001\.xhtml"[^<]*>[^<]+<\/a><ol><li><a href="text\/chapter_0002\.xhtml"/,
+    );
     const css = execFileSync('unzip', ['-p', file, 'OEBPS/styles/weread.css'], {
         encoding: 'utf8',
     });
@@ -521,5 +559,6 @@ try {
     clearTimeout(timeout);
     chrome.kill();
     await exited;
+    await network.close();
     await rm(workspace, { recursive: true, force: true, maxRetries: 3 });
 }

@@ -1,11 +1,14 @@
-import { buildEpub, sanitizeFilename, type EpubImage } from './epub/builder.ts';
+import { createAssetQueue } from './assets.ts';
+import { buildEpub, sanitizeFilename, type EpubChapter } from './epub/builder.ts';
 import {
-    chapterLinks,
-    httpsURL,
-    imageExtensionAndType,
+    chapterIndex,
+    chapterResources,
     parseChapter,
+    rewriteChapterLinks,
     rewriteCss,
+    type ChapterDocument,
 } from './epub/document.ts';
+import { type FetchAsset } from './resource.ts';
 import { createWeReadClient, wait } from './weread/client.ts';
 
 type State =
@@ -31,10 +34,8 @@ interface Options {
     imageConcurrency?: number;
     emptyRetryDelaysMs?: number[];
     requestTimeoutMs?: number;
-    fetchAsset?: (url: string, signal: AbortSignal) => Promise<Uint8Array<ArrayBuffer>>;
+    fetchAsset?: FetchAsset;
 }
-
-const imageBudget = 128 * 1024 * 1024;
 
 export function createEbookExport({
     win,
@@ -45,9 +46,7 @@ export function createEbookExport({
     imageConcurrency = 4,
     emptyRetryDelaysMs = [3000, 8000],
     requestTimeoutMs = 20000,
-    fetchAsset = async () => {
-        throw new Error('No image downloader is available');
-    },
+    fetchAsset = async () => ({ status: 'unavailable' }),
 }: Options) {
     let state: State = { stage: 'idle', message: '' };
     let controller: AbortController | undefined;
@@ -81,6 +80,9 @@ export function createEbookExport({
             emptyRetryDelaysMs,
             shardDelayMs,
         );
+        const queue = createAssetQueue(fetchAsset, signal, imageDelayMs, {
+            concurrency: imageConcurrency,
+        });
         let where = '';
         update({ stage: 'preparing', message: 'Preparing download…' });
 
@@ -90,7 +92,10 @@ export function createEbookExport({
                 throw new Error('Missing psvts token. Refresh the reader page and try again.');
             const catalog = await client.catalog(book.bookId);
             if (!catalog.length) throw new Error('No chapters are available to export.');
-            const chapters: (ReturnType<typeof parseChapter> & { title: string })[] = [];
+            const chapters: ChapterDocument[] = [];
+            let serializer: XMLSerializer | undefined;
+            const parentIndices = new Map<string, number>();
+            let retainedText = 0;
             let css = '';
             let cssBase = readerUrl;
             const chapterProgress = () =>
@@ -116,140 +121,103 @@ export function createEbookExport({
                 }
                 where = chapter.title ? '"' + chapter.title + '": ' : '';
                 const source = await client.chapter(book, chapter);
-                const parsed = parseChapter(source, readerUrl, chapter.href);
-                chapters.push({ ...parsed, title: chapter.title || String(chapter.chapterUid) });
+                serializer ??= new XMLSerializer();
+                const { body, ...parsed } = parseChapter(source, readerUrl, chapter.href);
+                const references: string[] = [];
+                chapterResources(body, parsed.embeddedCss, (value) => {
+                    references.push(value);
+                    return value;
+                });
+                const markup = serializer.serializeToString(body);
+                retainedText += (markup.length + parsed.embeddedCss.length) * 2;
+                if (retainedText > 96 * 1024 * 1024)
+                    throw new Error('The book text exceeds the export size limit.');
+                chapters.push({
+                    ...parsed,
+                    title: chapter.title || String(chapter.chapterUid),
+                    markup,
+                    anchors: new Set([
+                        body.id,
+                        ...Array.from(body.querySelectorAll('[id]'), (node) => node.id),
+                    ]),
+                });
+                parentIndices.set(String(chapter.chapterUid), done);
+                await queue.add(references, parsed.base);
                 chapterProgress();
                 if (!css) {
                     css = await client.css(book, chapter);
                     cssBase = parsed.base;
+                    const styles: string[] = [];
+                    rewriteCss(css, (value) => {
+                        styles.push(value);
+                        return value;
+                    });
+                    await queue.add(styles, cssBase);
                 }
             }
 
             await scheduler.yield();
             signal.throwIfAborted();
-            chapterLinks(chapters);
             where = '';
-            update({ stage: 'images', message: 'Finishing image downloads…' });
-            const resourceURLs = new Set<string>();
-            function resourceURL(value: string, base: string) {
-                const url = httpsURL(value, base);
-                if (
-                    !url ||
-                    !(url.hostname === 'weread.qq.com' || url.hostname.endsWith('.weread.qq.com'))
-                )
-                    return;
-                url.hash = '';
-                return url.href;
-            }
-            function collect(value: string, base: string) {
-                const url = resourceURL(value, base);
-                if (url) resourceURLs.add(url);
-                return url;
-            }
-            const imageNodes: { element: Element; url: string | undefined; attribute: string }[] =
-                [];
-            const inlineStyles: {
-                element: Element;
-                base: string;
-                text: string;
-            }[] = [];
-            for (const { body, base, embeddedCss } of chapters) {
-                rewriteCss(embeddedCss, (value) => collect(value, base));
-                for (const image of body.querySelectorAll('img, svg image')) {
-                    const attribute =
-                        image.localName === 'img'
-                            ? 'src'
-                            : image.hasAttribute('href')
-                              ? 'href'
-                              : 'xlink:href';
-                    imageNodes.push({
-                        element: image,
-                        url: collect(image.getAttribute(attribute) ?? '', base),
-                        attribute,
-                    });
-                    if (image.localName === 'image' && attribute === 'href')
-                        image.removeAttribute('xlink:href');
-                }
-                for (const element of body.querySelectorAll('[style]')) {
-                    const text = element.getAttribute('style') ?? '';
-                    inlineStyles.push({ element, base, text });
-                    rewriteCss(text, (value) => collect(value, base), true);
-                }
-            }
-            rewriteCss(css, (value) => collect(value, cssBase));
-            const queue = [...resourceURLs];
-            const paths = new Map<string, string>();
-            let cursor = 0;
-            let remaining = imageBudget;
-            const assets: EpubImage[] = [];
-            async function worker() {
-                while (cursor < queue.length) {
-                    signal.throwIfAborted();
-                    const index = cursor++;
-                    const task = queue[index];
-                    if (!task) break;
-                    const src = task;
-                    let href = '';
-                    try {
-                        if (src && remaining > 0) {
-                            const data = await fetchAsset(src, signal);
-                            signal.throwIfAborted();
-                            const kind = imageExtensionAndType(data);
-                            if (kind && data.length <= remaining) {
-                                remaining -= data.length;
-                                href = 'images/image_' + (index + 1) + kind.ext;
-                                assets.push({ href, mediaType: kind.mediaType, data });
-                                paths.set(src, '../' + href);
-                            }
-                        }
-                    } catch {
-                        signal.throwIfAborted();
-                    }
-                    if (cursor < queue.length) await wait(imageDelayMs(), signal);
-                }
-            }
-            await Promise.all(
-                Array.from({ length: Math.min(imageConcurrency, queue.length) }, worker),
-            );
-
+            update({ stage: 'images', message: 'Finishing resource downloads…' });
+            await queue.drain();
             signal.throwIfAborted();
-            for (const { element, url, attribute } of imageNodes) {
-                const href = url && paths.get(url);
-                if (href) element.setAttribute(attribute, href);
-                else {
-                    const alt = element.getAttribute('alt');
-                    if (element.localName === 'img')
-                        element.replaceWith(alt ? '[Illustration: ' + alt + ']' : '[Image]');
-                    else element.remove();
-                }
-            }
-            for (const { element, base, text } of inlineStyles) {
-                element.setAttribute(
-                    'style',
-                    rewriteCss(text, (value) => paths.get(resourceURL(value, base) ?? ''), true),
-                );
-            }
-            css = rewriteCss(css, (value) => paths.get(resourceURL(value, cssBase) ?? ''));
 
             update({ stage: 'packaging', message: 'Packaging EPUB…' });
-            const serializer = new XMLSerializer();
+            const parser = new DOMParser();
+            const outputSerializer = serializer ?? new XMLSerializer();
+            const documents = chapterIndex(chapters);
+            const completed: EpubChapter[] = [];
+            for (const [index, chapter] of chapters.entries()) {
+                signal.throwIfAborted();
+                const body = parser.parseFromString(
+                    chapter.markup,
+                    'application/xhtml+xml',
+                ).documentElement;
+                if (body.localName !== 'body') throw new Error('Could not prepare chapter XHTML.');
+                rewriteChapterLinks(body, index, chapters, documents);
+                const embeddedCss = chapterResources(
+                    body,
+                    chapter.embeddedCss,
+                    (value, imageOnly) => queue.path(value, chapter.base, imageOnly),
+                    true,
+                );
+                const attributes = Object.fromEntries(
+                    Array.from(body.attributes, ({ name, value }) => [name, value]),
+                );
+                const first = body.firstElementChild;
+                const hasHeading =
+                    !!first &&
+                    /^h[1-6]$/.test(first.localName) &&
+                    first.textContent.trim() === chapter.title.trim();
+                const source = Array.from(body.childNodes, (node) =>
+                    outputSerializer.serializeToString(node),
+                ).join('');
+                const parent = parentIndices.get(String(catalog[index]?.parentChapterUid ?? ''));
+                completed.push({
+                    title: chapter.title,
+                    source,
+                    properties: chapter.properties,
+                    embeddedCss,
+                    attributes,
+                    hasHeading,
+                    ...(chapter.language ? { language: chapter.language } : {}),
+                    ...(parent !== undefined && parent < index ? { parent } : {}),
+                });
+                chapter.markup = '';
+                if (index % 16 === 0) await scheduler.yield();
+            }
+            css = rewriteCss(css, (value) => queue.path(value, cssBase));
+            const { assets, unavailable } = queue.result();
             const archive = await buildEpub({
                 title: book.title,
                 author: book.author,
+                language: book.language ?? 'und',
                 css,
                 signal,
                 assets,
                 now: Date.now(),
-                chapters: chapters.map(({ title, body, properties, embeddedCss, base }) => ({
-                    title,
-                    properties,
-                    embeddedCss: rewriteCss(embeddedCss, (value) =>
-                        paths.get(resourceURL(value, base) ?? ''),
-                    ),
-                    source: Array.from(body.childNodes, (node) =>
-                        serializer.serializeToString(node),
-                    ).join(''),
-                })),
+                chapters: completed,
             });
             signal.throwIfAborted();
             const url = URL.createObjectURL(archive);
@@ -268,8 +236,10 @@ export function createEbookExport({
                 message:
                     'EPUB sent to browser downloads. Chapters: ' +
                     chapters.length +
-                    '. Images: ' +
-                    assets.length,
+                    '. Resources: ' +
+                    assets.length +
+                    '.' +
+                    (unavailable ? ' ' + unavailable + ' resources unavailable.' : ''),
             };
         } catch (error) {
             state = signal.aborted
@@ -283,6 +253,7 @@ export function createEbookExport({
                   };
         } finally {
             job.abort();
+            await queue.drain();
             controller = undefined;
             onStateChange();
         }

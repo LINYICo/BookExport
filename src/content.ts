@@ -1,42 +1,35 @@
 import { createEbookExport } from './export.ts';
+import { isResourceResponse, type FetchAsset, type ResourceResponse } from './resource.ts';
 import { createDownloadPanel } from './ui/panel.ts';
 
-let readerPath = location.pathname;
+const readerKey = () => location.pathname + location.search;
+let readerPath = readerKey();
 let panel: ReturnType<typeof createDownloadPanel> | undefined;
 let exporter: ReturnType<typeof createEbookExport> | undefined;
 
-async function fetchAsset(url: string, signal: AbortSignal) {
+const fetchAsset: FetchAsset = async (url, limit, signal) => {
     signal.throwIfAborted();
     const port = chrome.runtime.connect({ name: 'book-image' });
     let cancel: (() => void) | undefined;
     try {
-        return await new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
+        return await new Promise<ResourceResponse>((resolve, reject) => {
             cancel = () => reject(signal.reason);
             signal.addEventListener('abort', cancel, { once: true });
-            port.onMessage.addListener((response: { data?: unknown; error?: string }) => {
-                if (
-                    response?.data instanceof Uint8Array &&
-                    response.data.buffer instanceof ArrayBuffer
-                ) {
-                    resolve(
-                        new Uint8Array(
-                            response.data.buffer,
-                            response.data.byteOffset,
-                            response.data.byteLength,
-                        ),
-                    );
-                } else reject(new Error(response?.error || 'Invalid image response'));
+            port.onMessage.addListener((response: unknown) => {
+                if (isResourceResponse(response)) resolve(response);
+                else resolve({ status: 'unavailable' });
             });
-            port.onDisconnect.addListener(() =>
-                reject(new Error(chrome.runtime.lastError?.message || 'Image connection closed')),
-            );
-            port.postMessage(url);
+            port.onDisconnect.addListener(() => {
+                void chrome.runtime.lastError;
+                resolve({ status: 'unavailable' });
+            });
+            port.postMessage({ url, limit });
         });
     } finally {
         if (cancel) signal.removeEventListener('abort', cancel);
         port.disconnect();
     }
-}
+};
 
 function publish() {
     panel?.render({
@@ -49,7 +42,16 @@ function publish() {
 chrome.runtime.onMessage.addListener((message: { type?: string }, sender) => {
     if (sender.id !== chrome.runtime.id || message?.type !== 'TOGGLE_DOWNLOAD_PANEL') return;
     panel ??= createDownloadPanel(() => {
-        exporter ??= createEbookExport({ win: window, fetchAsset, onStateChange: publish });
+        if (!exporter) {
+            const task = createEbookExport({
+                win: window,
+                fetchAsset,
+                onStateChange: () => {
+                    if (exporter === task) publish();
+                },
+            });
+            exporter = task;
+        }
         exporter.toggle();
     });
     publish();
@@ -57,10 +59,10 @@ chrome.runtime.onMessage.addListener((message: { type?: string }, sender) => {
 });
 
 window.navigation.addEventListener('currententrychange', () => {
-    if (readerPath === location.pathname) return;
+    if (readerPath === readerKey()) return;
     panel?.close();
     const previous = exporter;
-    readerPath = location.pathname;
+    readerPath = readerKey();
     exporter = undefined;
     if (previous?.viewState().running) previous.toggle();
     publish();

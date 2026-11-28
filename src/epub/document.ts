@@ -22,8 +22,15 @@ export function imageExtensionAndType(data: Uint8Array) {
     return null;
 }
 
+function validXmlText(source: string) {
+    return source.replace(/[\p{Cc}\uD800-\uDFFF\uFFFE\uFFFF]/gu, (character) => {
+        const code = character.charCodeAt(0);
+        return '\t\n\r'.includes(character) || (code >= 127 && code <= 159) ? character : '\ufffd';
+    });
+}
+
 export function escapeXml(value: unknown) {
-    return String(value)
+    return validXmlText(String(value))
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -32,18 +39,7 @@ export function escapeXml(value: unknown) {
 }
 
 export function parseChapter(source: string, readerUrl: string, catalogHref?: string) {
-    // XML 1.0 excludes these characters even when the reader can display them.
-    const clean = Array.from(source, (character) => {
-        const code = character.codePointAt(0) ?? 0;
-        return code === 9 ||
-            code === 10 ||
-            code === 13 ||
-            (code >= 32 && code <= 0xd7ff) ||
-            (code >= 0xe000 && code <= 0xfffd) ||
-            code >= 0x10000
-            ? character
-            : '\ufffd';
-    }).join('');
+    const clean = validXmlText(source);
     const parser = new DOMParser();
     const xml = parser.parseFromString(clean, 'application/xhtml+xml');
     const doc = parser.parseFromString('', 'text/html');
@@ -63,17 +59,21 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
         (body ? xml.documentElement.getAttribute('xml:base') : null);
     const base = httpsURL(sourceBase ?? '', href?.href ?? readerUrl) ?? href ?? new URL(readerUrl);
     if (body) {
+        for (const name of ['class', 'id', 'dir', 'lang', 'style']) {
+            const value = body.getAttribute(name);
+            if (value !== null) doc.body.setAttribute(name, value);
+        }
         for (const node of body.childNodes) doc.body.append(doc.importNode(node, true));
     } else doc.body.append(template.content);
     doc.body
         .querySelectorAll(
-            'script, iframe, frame, object, embed, link, base, meta, form, audio, video, source, style, foreignObject',
+            'script, iframe, frame, object, embed, link, base, meta, form, audio, video, source, style, foreignObject, animate, animateMotion, animateTransform, set, discard, template',
         )
         .forEach((element) => element.remove());
     for (const element of doc.body.querySelectorAll('*')) {
         for (const { name, value } of Array.from(element.attributes)) {
             if (
-                name.startsWith('on') ||
+                name.toLowerCase().startsWith('on') ||
                 ['srcset', 'data-src', 'poster', 'ping', 'background', 'xml:base'].includes(name)
             )
                 element.removeAttribute(name);
@@ -92,7 +92,18 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
         ...(doc.body.querySelector('svg') ? ['svg' as const] : []),
         ...(doc.body.querySelector('math') ? ['mathml' as const] : []),
     ];
-    return { body: doc.body, base: base.href, href: href?.href, properties, embeddedCss };
+    return {
+        body: doc.body,
+        base: base.href,
+        href: href?.href,
+        properties,
+        embeddedCss,
+        language: languageTag(
+            body?.getAttribute('lang') ||
+                xml.documentElement.getAttribute('xml:lang') ||
+                xml.documentElement.getAttribute('lang'),
+        ),
+    };
 }
 
 export function httpsURL(value: string, base: string) {
@@ -113,25 +124,28 @@ export function rewriteCss(
     const declarations = (style: CSSStyleDeclaration) => {
         for (const property of Array.from(style)) {
             const original = style.getPropertyValue(property);
-            // Custom properties carry raw tokens and can hide URLs from CSSOM normalization.
+            const urlTokens = /url\("((?:[^"\\]|\\.)*)"\)/gi;
+            const raw = original.replace(urlTokens, '');
+            // Unresolved variables and custom properties can contain unparsed URL tokens.
             if (
-                property.startsWith('--') &&
-                /["'\\]|\b(?:url|image|image-set|src)\s*\(/i.test(original)
+                (property.startsWith('--') &&
+                    /["'\\]|\b(?:url|image|image-set|src)\s*\(/i.test(original)) ||
+                /\burl\s*\(/i.test(raw) ||
+                (/\b(?:image-set|image|src)\s*\(/i.test(raw) && /["'\\]/.test(raw)) ||
+                (/\bvar\s*\(/i.test(raw) && raw.includes('\\'))
             ) {
+                resolve('');
                 style.removeProperty(property);
                 continue;
             }
             let unavailable = false;
-            const value = original.replace(
-                /url\("((?:[^"\\]|\\.)*)"\)/gi,
-                (whole: string, target: string) => {
-                    if (target.startsWith('#')) return whole;
-                    const mapped = resolve(target);
-                    if (mapped) return 'url(' + JSON.stringify(mapped) + ')';
-                    unavailable = true;
-                    return whole;
-                },
-            );
+            const value = original.replace(urlTokens, (whole: string, target: string) => {
+                if (target.startsWith('#')) return whole;
+                const mapped = resolve(target);
+                if (mapped) return 'url(' + JSON.stringify(mapped) + ')';
+                unavailable = true;
+                return whole;
+            });
             if (unavailable) style.removeProperty(property);
             else style.setProperty(property, value, style.getPropertyPriority(property));
         }
@@ -141,6 +155,12 @@ export function rewriteCss(
         style.cssText = css;
         declarations(style);
         return style.cssText;
+    }
+    // Constructable stylesheets discard imports without exposing them through CSSOM.
+    const tokens =
+        /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|@import(?=[^a-z0-9_-]|$)/gi;
+    for (const [token] of css.matchAll(tokens)) {
+        if (token.toLowerCase() === '@import') resolve('');
     }
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(css);
@@ -156,7 +176,65 @@ export function rewriteCss(
     return Array.from(sheet.cssRules, (rule) => rule.cssText).join('\n');
 }
 
-export function chapterLinks(chapters: ReturnType<typeof parseChapter>[]) {
+export function languageTag(value: unknown) {
+    if (typeof value !== 'string' || !value.trim()) return;
+    try {
+        return Intl.getCanonicalLocales(value)[0];
+    } catch {
+        return undefined;
+    }
+}
+
+type ParsedChapter = ReturnType<typeof parseChapter>;
+export type ChapterDocument = Omit<ParsedChapter, 'body'> & {
+    markup: string;
+    anchors: Set<string>;
+    title: string;
+};
+
+export function chapterResources(
+    body: Element,
+    css: string,
+    resolve: (url: string, imageOnly?: boolean) => string | undefined,
+    finalize = false,
+) {
+    for (const image of body.querySelectorAll('img, svg image')) {
+        const html = image.localName === 'img';
+        const attribute = html ? 'src' : image.hasAttribute('href') ? 'href' : 'xlink:href';
+        const src = image.getAttribute(attribute);
+        const href = resolve(src ?? '', true);
+        if (!finalize) continue;
+        if (!html && attribute === 'href') image.removeAttribute('xlink:href');
+        if (href) {
+            image.setAttribute(attribute, href);
+            if (html && !image.hasAttribute('alt')) image.setAttribute('alt', '');
+        } else if (html) {
+            const alt = image.getAttribute('alt');
+            image.replaceWith(alt ? '[Illustration: ' + alt + ']' : '[Image]');
+        } else image.remove();
+    }
+
+    const styled = body.hasAttribute('style')
+        ? [body, ...body.querySelectorAll('[style]')]
+        : body.querySelectorAll('[style]');
+    for (const element of styled) {
+        const text = element.getAttribute('style') ?? '';
+        const style = rewriteCss(text, resolve, true);
+        if (finalize) element.setAttribute('style', style);
+    }
+    for (const element of body.querySelectorAll('svg, svg *')) {
+        for (const { name, value } of Array.from(element.attributes)) {
+            if (!/url\s*\(/i.test(value) || name === 'style') continue;
+            // Presentation attributes can reference symbols in the same chapter.
+            if (/^url\(\s*['"]?#[\w:.-]+['"]?\s*\)$/i.test(value.trim())) continue;
+            if (finalize) element.removeAttribute(name);
+            else resolve('');
+        }
+    }
+    return rewriteCss(css, resolve);
+}
+
+export function chapterIndex(chapters: ChapterDocument[]) {
     const documents = new Map<string, number>();
     for (const [index, chapter] of chapters.entries()) {
         if (!chapter.href) continue;
@@ -164,41 +242,46 @@ export function chapterLinks(chapters: ReturnType<typeof parseChapter>[]) {
         url.hash = '';
         documents.set(url.href, index);
     }
-    for (const [index, chapter] of chapters.entries()) {
-        for (const anchor of chapter.body.querySelectorAll('a[href]')) {
-            const href = anchor.getAttribute('href') ?? '';
-            const url = httpsURL(href, chapter.base);
-            if (!url) {
+    return documents;
+}
+
+export function rewriteChapterLinks(
+    body: Element,
+    index: number,
+    chapters: ChapterDocument[],
+    documents: Map<string, number>,
+) {
+    const chapter = chapters[index];
+    if (!chapter) return;
+    for (const anchor of body.querySelectorAll('a[href]')) {
+        const href = anchor.getAttribute('href') ?? '';
+        const url = httpsURL(href, chapter.base);
+        if (!url) {
+            anchor.removeAttribute('href');
+            continue;
+        }
+        let fragment = url.hash;
+        url.hash = '';
+        const target = href.startsWith('#') ? index : documents.get(url.href);
+        if (target !== undefined) {
+            if (fragment) {
+                try {
+                    if (!chapters[target]?.anchors.has(decodeURIComponent(fragment.slice(1))))
+                        fragment = '';
+                } catch {
+                    fragment = '';
+                }
+            }
+            if (target === index && !fragment && href.startsWith('#')) {
                 anchor.removeAttribute('href');
                 continue;
             }
-            let fragment = url.hash;
-            url.hash = '';
-            const target = href.startsWith('#') ? index : documents.get(url.href);
-            if (target !== undefined) {
-                if (fragment) {
-                    try {
-                        if (
-                            !chapters[target]?.body.ownerDocument.getElementById(
-                                decodeURIComponent(fragment.slice(1)),
-                            )
-                        )
-                            fragment = '';
-                    } catch {
-                        fragment = '';
-                    }
-                }
-                if (target === index && !fragment && href.startsWith('#')) {
-                    anchor.removeAttribute('href');
-                    continue;
-                }
-                const filename =
-                    target === index && fragment
-                        ? ''
-                        : chapterFileName(target + 1).slice('text/'.length);
-                anchor.setAttribute('href', filename + fragment);
-            } else if (!href.startsWith('https://')) anchor.removeAttribute('href');
-        }
+            const filename =
+                target === index && fragment
+                    ? ''
+                    : chapterFileName(target + 1).slice('text/'.length);
+            anchor.setAttribute('href', filename + fragment);
+        } else if (!/^https:\/\//i.test(href)) anchor.removeAttribute('href');
     }
 }
 
@@ -206,20 +289,26 @@ export function chapterFileName(index: number) {
     return 'text/chapter_' + String(index).padStart(4, '0') + '.xhtml';
 }
 
-export function makeChapterXhtml(title: string, source: string, css = '') {
-    return (
-        '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n' +
-        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">' +
-        '<head><meta charset="utf-8"/><title>' +
-        escapeXml(title) +
-        '</title>' +
-        '<link rel="stylesheet" type="text/css" href="../styles/weread.css"/>' +
-        (css ? '<style>' + escapeXml(css) + '</style>' : '') +
-        '</head>' +
-        '<body><h1>' +
-        escapeXml(title) +
-        '</h1>' +
-        source +
-        '</body></html>'
-    );
+export function makeChapterXhtml(
+    title: string,
+    source: string,
+    css = '',
+    options: {
+        language?: string;
+        attributes?: Readonly<Record<string, string>>;
+        hasHeading?: boolean;
+    } = {},
+) {
+    const language = languageTag(options.language) ?? 'und';
+    const attributes = Object.entries(options.attributes ?? {})
+        .filter(([name]) => ['class', 'id', 'dir', 'lang', 'style'].includes(name))
+        .map(([name, value]) => ' ' + name + '="' + escapeXml(value) + '"')
+        .join('');
+    const heading = options.hasHeading ? '' : '<h1>' + escapeXml(title) + '</h1>';
+    return `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="${language}" xml:lang="${language}">
+<head><meta charset="utf-8"/><title>${escapeXml(title)}</title>
+<link rel="stylesheet" type="text/css" href="../styles/weread.css"/>${css ? '<style>' + escapeXml(css) + '</style>' : ''}</head>
+<body${attributes}>${heading}${source}</body></html>`;
 }

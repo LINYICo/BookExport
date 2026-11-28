@@ -1,3 +1,5 @@
+import { languageTag } from '../epub/document.ts';
+import { ByteLimitError, readBounded } from '../io.ts';
 import { buildContentParams, decodeContentShards, decodeStyleShard } from './protocol.ts';
 
 export interface Chapter {
@@ -5,12 +7,14 @@ export interface Chapter {
     title?: string;
     wordCount?: number | string;
     href?: string;
+    parentChapterUid?: string;
 }
 export interface Book {
     bookId: string;
     title: string;
     author: string;
     psvts: string;
+    language?: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -27,8 +31,10 @@ export function extractInitialState(html: string): unknown {
         );
     try {
         return JSON.parse(json);
-    } catch (error) {
-        throw new Error('Could not parse __INITIAL_STATE__: ' + error);
+    } catch {
+        throw new Error(
+            'Could not parse __INITIAL_STATE__. Refresh the reader page and try again.',
+        );
     }
 }
 
@@ -38,15 +44,17 @@ export function parseReaderState(state: unknown): Book {
     const bookId = String(info.bookId || '');
     if (!bookId)
         throw new Error('Missing reader.bookInfo.bookId. Open a book in the WeRead reader.');
+    const language = languageTag(info.language ?? info.lang);
     return {
         bookId,
+        ...(language ? { language } : {}),
         title: typeof info.title === 'string' && info.title ? info.title : bookId,
         author: typeof info.author === 'string' ? info.author : '',
         psvts: typeof reader.psvts === 'string' ? reader.psvts : '',
     };
 }
 
-function isChapter(value: unknown): value is Omit<Chapter, 'href'> {
+function isChapter(value: unknown): value is Omit<Chapter, 'href' | 'parentChapterUid'> {
     const item = record(value);
     return (
         !!item.chapterUid &&
@@ -75,12 +83,15 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
         const chapters = item.updated ?? item.chapterInfos ?? item.chapters ?? [];
         if (!Array.isArray(chapters)) throw new Error('Unexpected chapterInfos response format');
         return chapters.filter(isChapter).map(({ chapterUid, title, wordCount, ...source }) => {
-            const href = record(source).href;
+            const { href, parentChapterUid } = record(source);
             return {
                 chapterUid,
                 ...(title !== undefined ? { title } : {}),
                 ...(wordCount !== undefined ? { wordCount } : {}),
                 ...(typeof href === 'string' ? { href } : {}),
+                ...(typeof parentChapterUid === 'string' || typeof parentChapterUid === 'number'
+                    ? { parentChapterUid: String(parentChapterUid) }
+                    : {}),
             };
         });
     }
@@ -131,11 +142,21 @@ export function createWeReadClient(
         }
         try {
             const response = await fetch(url, options);
-            if (!response.ok)
-                throw new Error('WeRead request failed with HTTP ' + response.status + ': ' + url);
-            return await response.text();
+            if (!response.ok) {
+                void response.body?.cancel().catch(() => {});
+                if (response.status === 401 || response.status === 403)
+                    throw new Error(
+                        'WeRead denied this request. Check your sign-in and access to this book.',
+                    );
+                throw new Error('WeRead request failed with HTTP ' + response.status + '.');
+            }
+            return new TextDecoder().decode(
+                await readBounded(response, 16 * 1024 * 1024, requestSignal),
+            );
         } catch (error) {
             signal.throwIfAborted();
+            if (error instanceof ByteLimitError)
+                throw new Error('The WeRead response exceeded the size limit.');
             if (deadline.aborted)
                 throw new Error(
                     'WeRead did not respond in time. Click Download EPUB to try again.',
@@ -155,7 +176,11 @@ export function createWeReadClient(
                 /* Report the raw response. */
             }
             if (code === '-2012') throw new ShardError('Session expired (-2012)', 'auth');
-            throw new Error('API error' + (code ? ' ' + code : '') + ': ' + text.slice(0, 120));
+            throw new Error(
+                'WeRead rejected the chapter request' +
+                    (/^-?\d+$/.test(code) ? ' (' + code + ')' : '') +
+                    '.',
+            );
         }
         return text;
     }
@@ -209,7 +234,9 @@ export function createWeReadClient(
             try {
                 payload = JSON.parse(text);
             } catch {
-                throw new Error('Could not parse the chapterInfos response: ' + text.slice(0, 120));
+                throw new Error(
+                    'Could not parse the chapterInfos response. Refresh the reader page and try again.',
+                );
             }
             return selectExportableChapters(normalizeCatalog(payload, bookId));
         },
