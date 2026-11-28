@@ -255,7 +255,12 @@ test('normalizeCatalog skips entries without a chapter UID and reports missing b
 test('normalizeCatalog validates fields and excludes untrusted metadata', () => {
     const chapters = [
         { chapterUid: 1, title: 'Valid', wordCount: '0', parentChapterUid: 2, href: 'a.xhtml' },
-        { chapterUid: '3', href: 42, parentChapterUid: {}, sections: [{ id: 2, title: 'Ignored' }] },
+        {
+            chapterUid: '3',
+            href: 42,
+            parentChapterUid: {},
+            sections: [{ id: 2, title: 'Ignored' }],
+        },
         { chapterUid: 4, title: 42 },
         { chapterUid: 5, wordCount: false },
         { chapterUid: true },
