@@ -7,7 +7,7 @@ export default [
         transform: { target: 'esnext' },
         moduleTypes: { '.css': 'text' },
         output: {
-            file: 'dist/extension/content.js',
+            file: 'extension/content.js',
             format: 'iife',
             minify: process.argv.includes('--release'),
             sourcemap: process.argv.includes('--watch'),
@@ -18,7 +18,7 @@ export default [
         platform: 'browser',
         transform: { target: 'esnext' },
         output: {
-            file: 'dist/extension/background.js',
+            file: 'extension/background.js',
             format: 'es',
             minify: process.argv.includes('--release'),
             sourcemap: process.argv.includes('--watch'),

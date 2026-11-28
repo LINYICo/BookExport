@@ -6,8 +6,34 @@ import { createServer } from 'node:https';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { setTimeout as wait } from 'node:timers/promises';
+import { crc32, deflateSync } from 'node:zlib';
 
-export async function resourceServer(workspace: string) {
+function largePng() {
+    function chunk(tag: string, data: Buffer) {
+        const header = Buffer.alloc(8);
+        header.writeUInt32BE(data.length);
+        header.write(tag, 4);
+        const checksum = Buffer.alloc(4);
+        checksum.writeUInt32BE(crc32(data, crc32(header.subarray(4))));
+        return Buffer.concat([header, data, checksum]);
+    }
+    const width = 2048;
+    const height = 1792;
+    const dimensions = Buffer.alloc(13);
+    dimensions.writeUInt32BE(width);
+    dimensions.writeUInt32BE(height, 4);
+    dimensions[8] = 8;
+    dimensions[9] = 6;
+    const pixels = Buffer.alloc((width * 4 + 1) * height);
+    return Buffer.concat([
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        chunk('IHDR', dimensions),
+        chunk('IDAT', deflateSync(pixels, { level: 0 })),
+        chunk('IEND', Buffer.alloc(0)),
+    ]);
+}
+
+export async function resourceServer(workspace: string, stress = false) {
     const keyFile = join(workspace, 'fixture.key');
     const certFile = join(workspace, 'fixture.pem');
     execFileSync(
@@ -44,11 +70,15 @@ export async function resourceServer(workspace: string) {
         credentials: 0,
         requests: new Map<string, number>(),
         streamed: 0,
+        firstRequestAt: 0,
+        lastResponseAt: 0,
     };
     const chunk = Buffer.alloc(65536);
+    const large = stress ? largePng() : undefined;
     const server = createServer({ key, cert }, (request, response) => {
         const name =
             new URL(request.url ?? '/', 'https://localhost').pathname.split('/').at(-1) ?? '';
+        held.firstRequestAt ||= performance.now();
         held.requests.set(name, (held.requests.get(name) ?? 0) + 1);
         if (request.headers.cookie || request.headers.authorization || request.headers.referer)
             held.credentials++;
@@ -57,6 +87,7 @@ export async function resourceServer(workspace: string) {
         const isHeld = held.hold;
         response.once('close', () => {
             held.active--;
+            held.lastResponseAt = performance.now();
             if (isHeld && !response.writableFinished) held.aborted++;
         });
         response.setHeader('Cache-Control', 'no-store');
@@ -87,7 +118,11 @@ export async function resourceServer(workspace: string) {
                 );
                 response.once('close', () => stream.destroy());
                 stream.pipe(response);
-            } else response.end(png);
+            } else {
+                const data = large ?? png;
+                response.setHeader('Content-Length', data.length);
+                response.end(data);
+            }
         });
     });
     server.listen(0, '127.0.0.1');

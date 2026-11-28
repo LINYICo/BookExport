@@ -5,7 +5,9 @@ node_modules/
 .mcp.json
 *.log
 .DS_Store
-dist/
+/extension/
+/BookExport.zip
+/.bookexport-release-*/
 build/
 coverage/
 *.local

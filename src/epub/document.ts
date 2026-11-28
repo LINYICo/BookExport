@@ -43,11 +43,10 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
     const parser = new DOMParser();
     const xml = parser.parseFromString(clean, 'application/xhtml+xml');
     const doc = parser.parseFromString('', 'text/html');
-    const body = xml.querySelector('body');
-    // Template contents stay inert while parsing fragments and non-XML HTML.
-    const template = doc.createElement('template');
-    if (!body) template.innerHTML = clean;
-    const sourceRoot = body ? xml : template.content;
+    // Chromium can insert its own <body> around XML errors.
+    const xmlBody = xml.querySelector('parsererror') ? undefined : xml.querySelector('body');
+    const sourceRoot = xmlBody ? xml : parser.parseFromString(clean, 'text/html');
+    const body = xmlBody ?? sourceRoot.body;
     const embeddedCss = Array.from(
         sourceRoot.querySelectorAll('style'),
         (element) => element.textContent,
@@ -56,15 +55,21 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
     const href = httpsURL(catalogHref ?? '', readerUrl) ?? httpsURL(canonical ?? '', readerUrl);
     const sourceBase =
         sourceRoot.querySelector('base[href]')?.getAttribute('href') ??
-        (body ? xml.documentElement.getAttribute('xml:base') : null);
+        body?.getAttribute('xml:base') ??
+        sourceRoot.documentElement.getAttribute('xml:base');
     const base = httpsURL(sourceBase ?? '', href?.href ?? readerUrl) ?? href ?? new URL(readerUrl);
     if (body) {
-        for (const name of ['class', 'id', 'dir', 'lang', 'style']) {
+        for (const name of ['class', 'id', 'style']) {
             const value = body.getAttribute(name);
             if (value !== null) doc.body.setAttribute(name, value);
         }
+        const direction = body.getAttribute('dir')?.toLowerCase();
+        if (direction === 'ltr' || direction === 'rtl' || direction === 'auto')
+            doc.body.dir = direction;
+        const language = languageTag(body.getAttribute('lang') ?? body.getAttribute('xml:lang'));
+        if (language) doc.body.lang = language;
         for (const node of body.childNodes) doc.body.append(doc.importNode(node, true));
-    } else doc.body.append(template.content);
+    }
     doc.body
         .querySelectorAll(
             'script, iframe, frame, object, embed, link, base, meta, form, audio, video, source, style, foreignObject, animate, animateMotion, animateTransform, set, discard, template',
@@ -100,8 +105,9 @@ export function parseChapter(source: string, readerUrl: string, catalogHref?: st
         embeddedCss,
         language: languageTag(
             body?.getAttribute('lang') ||
-                xml.documentElement.getAttribute('xml:lang') ||
-                xml.documentElement.getAttribute('lang'),
+                body?.getAttribute('xml:lang') ||
+                sourceRoot.documentElement.getAttribute('xml:lang') ||
+                sourceRoot.documentElement.getAttribute('lang'),
         ),
     };
 }
@@ -120,12 +126,29 @@ export function rewriteCss(
     css: string,
     resolve: (url: string) => string | undefined,
     inline = false,
+    use?: (path: string) => void,
 ) {
     const declarations = (style: CSSStyleDeclaration) => {
         for (const property of Array.from(style)) {
-            const original = style.getPropertyValue(property);
             const urlTokens = /url\("((?:[^"\\]|\\.)*)"\)/gi;
-            const raw = original.replace(urlTokens, '');
+            // CSSOM normalizes straightforward candidates to quoted strings or url().
+            const imageSets =
+                /\bimage-set\(((?:(?:url|type)\("(?:[^"\\]|\\.)*"\)|"(?:[^"\\]|\\.)*"|[^()'"])+)\)/gi;
+            const candidates = /(?:(?:url|type)\("(?:[^"\\]|\\.)*"\)|"(?:[^"\\]|\\.)*"|[^,])+/gi;
+            const original = style
+                .getPropertyValue(property)
+                .replace(
+                    imageSets,
+                    (_, list: string) =>
+                        'image-set(' +
+                        (list.match(candidates) ?? [])
+                            .map((item) => item.trim().replace(/^("(?:[^"\\]|\\.)*")/, 'url($1)'))
+                            .join(', ') +
+                        ')',
+                );
+            const raw = original
+                .replace(urlTokens, '')
+                .replace(/\btype\("(?:[^"\\]|\\.)*"\)/gi, '');
             // Unresolved variables and custom properties can contain unparsed URL tokens.
             if (
                 (property.startsWith('--') &&
@@ -138,16 +161,39 @@ export function rewriteCss(
                 style.removeProperty(property);
                 continue;
             }
-            let unavailable = false;
-            const value = original.replace(urlTokens, (whole: string, target: string) => {
-                if (target.startsWith('#')) return whole;
-                const mapped = resolve(target);
-                if (mapped) return 'url(' + JSON.stringify(mapped) + ')';
-                unavailable = true;
-                return whole;
-            });
-            if (unavailable) style.removeProperty(property);
-            else style.setProperty(property, value, style.getPropertyPriority(property));
+            const mappedPaths = new Set<string>();
+            const missing = 'url("")';
+            const value = original
+                .replace(urlTokens, (whole: string, target: string) => {
+                    if (target.startsWith('#')) return whole;
+                    const decoded = target.replace(
+                        /\\(?:([0-9a-f]{1,6})[ \t\n\r\f]?|([^\n\r\f]))/gi,
+                        (_, hex: string | undefined, escaped: string | undefined) => {
+                            if (!hex) return escaped ?? '';
+                            const codePoint = Number.parseInt(hex, 16);
+                            return codePoint > 0 && codePoint <= 0x10ffff
+                                ? String.fromCodePoint(codePoint)
+                                : '\ufffd';
+                        },
+                    );
+                    const mapped = resolve(decoded);
+                    if (!mapped) return missing;
+                    mappedPaths.add(mapped);
+                    return 'url(' + JSON.stringify(mapped) + ')';
+                })
+                .replace(imageSets, (_, list: string) => {
+                    const kept = (list.match(candidates) ?? []).filter(
+                        (item) => !item.includes(missing),
+                    );
+                    return kept.length ? 'image-set(' + kept.join(',') + ')' : missing;
+                });
+            const priority = style.getPropertyPriority(property);
+            style.removeProperty(property);
+            if (value.includes(missing)) continue;
+            style.setProperty(property, value, priority);
+            if (use && mappedPaths.size)
+                for (const [, path] of style.getPropertyValue(property).matchAll(urlTokens))
+                    if (path && mappedPaths.has(path)) use(path);
         }
     };
     if (inline) {
@@ -196,21 +242,36 @@ export function chapterResources(
     body: Element,
     css: string,
     resolve: (url: string, imageOnly?: boolean) => string | undefined,
-    finalize = false,
+    use?: (path: string) => void,
 ) {
     for (const image of body.querySelectorAll('img, svg image')) {
         const html = image.localName === 'img';
         const attribute = html ? 'src' : image.hasAttribute('href') ? 'href' : 'xlink:href';
         const src = image.getAttribute(attribute);
         const href = resolve(src ?? '', true);
-        if (!finalize) continue;
+        if (!use) continue;
         if (!html && attribute === 'href') image.removeAttribute('xlink:href');
         if (href) {
             image.setAttribute(attribute, href);
+            use(href);
             if (html && !image.hasAttribute('alt')) image.setAttribute('alt', '');
         } else if (html) {
             const alt = image.getAttribute('alt');
-            image.replaceWith(alt ? '[Illustration: ' + alt + ']' : '[Image]');
+            const label = alt ? '[Illustration: ' + alt + ']' : '[Image]';
+            if (!image.id) image.replaceWith(label);
+            else {
+                const placeholder = body.ownerDocument.createElementNS(
+                    'http://www.w3.org/1999/xhtml',
+                    'span',
+                );
+                placeholder.id = image.id;
+                placeholder.textContent = label;
+                image.replaceWith(placeholder);
+            }
+        } else if (image.id) {
+            const placeholder = body.ownerDocument.createElementNS(image.namespaceURI, 'g');
+            placeholder.id = image.id;
+            image.replaceWith(placeholder);
         } else image.remove();
     }
 
@@ -219,19 +280,19 @@ export function chapterResources(
         : body.querySelectorAll('[style]');
     for (const element of styled) {
         const text = element.getAttribute('style') ?? '';
-        const style = rewriteCss(text, resolve, true);
-        if (finalize) element.setAttribute('style', style);
+        const style = rewriteCss(text, resolve, true, use);
+        if (use) element.setAttribute('style', style);
     }
     for (const element of body.querySelectorAll('svg, svg *')) {
         for (const { name, value } of Array.from(element.attributes)) {
             if (!/url\s*\(/i.test(value) || name === 'style') continue;
             // Presentation attributes can reference symbols in the same chapter.
             if (/^url\(\s*['"]?#[\w:.-]+['"]?\s*\)$/i.test(value.trim())) continue;
-            if (finalize) element.removeAttribute(name);
+            if (use) element.removeAttribute(name);
             else resolve('');
         }
     }
-    return rewriteCss(css, resolve);
+    return rewriteCss(css, resolve, false, use);
 }
 
 export function chapterIndex(chapters: ChapterDocument[]) {

@@ -1,4 +1,4 @@
 {
     "env": { "browser": true, "node": true, "webextensions": true },
-    "ignorePatterns": ["dist/", ".scratch/"]
+    "ignorePatterns": ["extension/", ".scratch/"]
 }

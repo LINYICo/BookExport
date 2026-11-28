@@ -66,5 +66,7 @@ jobs:
                   epubcheck --version
             - name: Check source and download an EPUB
               run: pnpm check
+            - name: Check the full-book resource budget in Chrome
+              run: pnpm test:chrome --stress
             - name: Verify release ZIP
               run: node scripts/release.ts

@@ -1,15 +1,16 @@
 import { watch as watchFiles } from 'node:fs';
 import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { build, watch } from 'rolldown';
 import config from '../rolldown.config.ts';
 
-const output = 'dist/extension';
+const output = 'extension';
 const staticRoot = resolve('public');
+const includeStatic = (path: string) => basename(path) !== '.DS_Store';
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
-await cp(staticRoot, output, { recursive: true });
+await cp(staticRoot, output, { recursive: true, filter: includeStatic });
 await cp('LICENSE', join(output, 'LICENSE'));
 
 async function syncManifest() {
@@ -33,7 +34,7 @@ await syncManifest();
 if (process.argv.includes('--watch')) {
     let pending = Promise.resolve();
     watchFiles(staticRoot, { recursive: true }, (_, name) => {
-        if (!name) return;
+        if (!name || !includeStatic(name)) return;
         const source = resolve(staticRoot, name);
         const relativePath = relative(staticRoot, source);
         if (!relativePath || relativePath.startsWith('..')) return;
@@ -50,7 +51,7 @@ if (process.argv.includes('--watch')) {
                 if (exists && relativePath === 'manifest.json') await syncManifest();
                 else if (exists) {
                     await mkdir(dirname(destination), { recursive: true });
-                    await cp(source, destination, { recursive: true });
+                    await cp(source, destination, { recursive: true, filter: includeStatic });
                 } else {
                     await rm(destination, { recursive: true, force: true });
                 }

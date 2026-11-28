@@ -1,4 +1,23 @@
-# Release history
+# Changelog
+
+## v0.4.2 - 2026-11-28
+
+### Fixed
+
+- Preserve the contents and language of HTML chapters when XHTML parsing fails.
+- Preserve links to unavailable illustrations and retain working CSS image candidates.
+- Include only referenced resources in the exported EPUB.
+
+### Changed
+
+- Build to `extension/` and replace the root `BookExport.zip` on each release.
+- Consolidate project history in this changelog.
+- Yield during large ZIP checksums and assemble large entries incrementally.
+
+### Tests
+
+- Exercise simultaneous tabs, Service Worker termination, packaging cancellation, and the full-book resource limit in Chrome.
+- Add repeatable Chrome benchmarks for shared and large image resources.
 
 ## v0.4.1 - 2026-11-28
 

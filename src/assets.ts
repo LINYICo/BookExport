@@ -120,8 +120,10 @@ export function createAssetQueue(
         if (imageOnly && asset) fail('unsupported');
     }
 
-    function result() {
-        const assets = Array.from(jobs.values()).flatMap(({ asset }) => (asset ? [asset] : []));
+    function result(usedPaths?: ReadonlySet<string>) {
+        const assets = Array.from(jobs.values()).flatMap(({ asset }) =>
+            asset && (!usedPaths || usedPaths.has('../' + asset.href)) ? [asset] : [],
+        );
         return {
             assets,
             references,

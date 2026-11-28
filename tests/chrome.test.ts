@@ -1,19 +1,24 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, stat } from 'node:fs/promises';
 import { Readable, Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resourceServer } from './fixtures/resource-server.ts';
+import { decodeContentShards, decodeStyleShard, wereadE } from '../src/weread/protocol.ts';
+import { encodeShards } from './fixtures/encode-shards.ts';
 import { EPUB_SHARDS, CSS_SHARD } from './fixtures/epub-shards.ts';
 
 const workspace = await mkdtemp(join(tmpdir(), 'bookexport-test-'));
 const profile = join(workspace, 'profile');
 const downloadPath = join(workspace, 'downloads');
 await mkdir(downloadPath);
-const network = await resourceServer(workspace);
+const benchmark = process.argv.includes('--benchmark');
+const stress = process.argv.includes('--stress');
+const metricsRun = benchmark || stress;
+const network = await resourceServer(workspace, stress);
 const executable =
     process.env.CHROME_BIN ||
     (process.platform === 'darwin'
@@ -52,7 +57,7 @@ type Event = {
         requestId: string;
         networkId?: string;
         canceled?: boolean;
-        request: { url: string };
+        request: { url: string; postData?: string };
         resourceType?: string;
     };
 };
@@ -133,17 +138,13 @@ async function waitFor(predicate: string, sessionId: string) {
     }
     throw new Error('Timed out: ' + predicate);
 }
-const timeout = setTimeout(() => chrome.kill(), 75000);
-try {
-    const { id: extension } = await send<{ id: string }>('Extensions.loadUnpacked', {
-        path: resolve('dist/extension'),
-    });
-    const { targetId: reader } = await send<{ targetId: string }>('Target.createTarget', {
+async function openReaderTab() {
+    const { targetId } = await send<{ targetId: string }>('Target.createTarget', {
         url: 'about:blank',
         forTab: true,
     });
     const { sessionId: tabSession } = await send<{ sessionId: string }>('Target.attachToTarget', {
-        targetId: reader,
+        targetId,
         flatten: true,
     });
     const attachedPage = Promise.withResolvers<string>();
@@ -178,6 +179,17 @@ try {
         { patterns: [{ urlPattern: 'https://weread.qq.com/*' }] },
         sessionId,
     );
+    return { targetId, sessionId };
+}
+
+const timeout = setTimeout(() => chrome.kill(), 110000);
+try {
+    const { id: extension } = await send<{ id: string }>('Extensions.loadUnpacked', {
+        path: resolve(process.env.BOOKEXPORT_EXTENSION ?? 'extension'),
+    });
+    const { targetId: reader, sessionId } = await openReaderTab();
+    let otherSession: string | undefined;
+    const otherShard = Promise.withResolvers<string>();
     const scriptReady = Promise.withResolvers<number>();
     const unhandled: unknown[] = [];
     const consoleMessages: unknown[] = [];
@@ -195,15 +207,51 @@ try {
     });
     await send('Runtime.enable', {}, sessionId);
     await send('Debugger.enable', {}, sessionId);
-    const [firstShard, middleShard, lastShard] = EPUB_SHARDS;
-    const chapterResponses = new Map([
-        ['e_0', firstShard],
-        ['e_1', middleShard],
-        ['e_3', lastShard],
-        ['e_2', CSS_SHARD],
-    ]);
-    let holdFirstShard = true;
+    const fixtureXhtml = decodeContentShards(...EPUB_SHARDS)
+        .replace(
+            'src="../illustrations/missing.png"',
+            'id="missing-image" src="../illustrations/missing.png"',
+        )
+        .replace(
+            'Next chapter</a>',
+            'Next chapter</a> <a href="#missing-image">See illustration</a> <a href="second.xhtml#missing-image">See next illustration</a>',
+        );
+    const fixtureHtml =
+        '<!doctype html>' +
+        fixtureXhtml
+            .replace('lang="en-US"', 'lang="fr"')
+            .replace('class="original-layout"', 'class="html-layout" id="html-start"')
+            .replace(
+                'A chapter for the browser download test.',
+                'A chapter in ordinary HTML.<br>Second line.',
+            )
+            .replace(
+                '</body>',
+                '<iframe src="https://denied.invalid/parser-only.png"></iframe></body>',
+            );
+    const stylesheet =
+        decodeStyleShard(CSS_SHARD) +
+        ' .responsive { background-image: image-set("../illustrations/responsive.png" 1x, url("../illustrations/missing.png") 2x); }' +
+        ' .unused { background-image: url("../illustrations/orphan.png"), url("../illustrations/missing.png"); }';
+    const benchmarkChapter =
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Fixture text</p>' +
+        Array.from(
+            { length: 12 },
+            (_, index) =>
+                '<p><img alt="Fixture image" src="https://assets.weread.qq.com/bench-' +
+                index +
+                '.png"/></p>',
+        ).join('') +
+        '</body></html>';
+    const first = encodeShards(metricsRun ? benchmarkChapter : fixtureXhtml, 3);
+    const second = metricsRun ? first : encodeShards(fixtureHtml, 3);
+    const [style] = encodeShards(metricsRun ? 'p { margin: 1em 0; }' : stylesheet, 1);
+    const paths = ['e_0', 'e_1', 'e_3'];
+    let holdFirstShard = !metricsRun;
+    if (metricsRun) network.held.hold = false;
     let chapterEnds = 0;
+    let chapterStartAt = 0;
+    let chapterEndAt = 0;
     let overlapped = false;
     let heldShard = Promise.withResolvers<void>();
     let abortedShard = Promise.withResolvers<boolean>();
@@ -214,6 +262,10 @@ try {
         behavior: 'allow',
         downloadPath,
         eventsEnabled: true,
+    });
+    let downloadStarts = 0;
+    events.push(({ method }) => {
+        if (method === 'Browser.downloadWillBegin') downloadStarts++;
     });
     const completed = new Promise<void>((resolve) =>
         events.push(({ method, params }) => {
@@ -227,19 +279,31 @@ try {
         }
         if (method !== 'Fetch.requestPaused') return;
         const url = new URL(params.request.url);
-        if (url.pathname.endsWith('/e_3') && ++chapterEnds === 2) {
-            overlapped = network.held.requests.has('shared.png');
-        }
+        if (url.pathname.endsWith('/e_0')) chapterStartAt ||= performance.now();
+        const lastChapterShard = url.pathname.endsWith('/e_3') && ++chapterEnds === 2;
+        if (lastChapterShard) overlapped = network.held.requests.size > 0;
         if (holdFirstShard && url.pathname.endsWith('/e_0')) {
             assert.ok(params.networkId);
+            if (sessionId === otherSession) {
+                otherShard.resolve(params.networkId);
+                return;
+            }
             heldRequests.add(params.networkId);
             heldURL = url.pathname;
             heldShard.resolve();
             return;
         }
+        const api = url.pathname.split('/').at(-1) ?? '';
+        const chapterId = params.request.postData
+            ? JSON.parse(params.request.postData).c
+            : undefined;
+        const shard =
+            api === 'e_2'
+                ? style
+                : (chapterId === wereadE('2') ? second : first)[paths.indexOf(api)];
         const body = url.pathname.startsWith('/web/reader/')
             ? '<title>Fixture Book - Fixture Author - \u5fae\u4fe1\u8bfb\u4e66</title><script>window.__INITIAL_STATE__={"reader":{"bookInfo":{"bookId":"42","title":"Fixture Book","language":"en-US"},"psvts":"test"}};(function(){});</script>'
-            : (chapterResponses.get(url.pathname.split('/').at(-1) ?? '') ??
+            : (shard ??
               JSON.stringify({
                   data: [
                       {
@@ -261,8 +325,9 @@ try {
                   ],
               }));
         setTimeout(
-            () =>
-                send(
+            () => {
+                if (lastChapterShard) chapterEndAt = performance.now();
+                void send(
                     'Fetch.fulfillRequest',
                     {
                         requestId: params.requestId,
@@ -273,7 +338,8 @@ try {
                         body: Buffer.from(body).toString('base64'),
                     },
                     sessionId,
-                ).catch(() => {}),
+                ).catch(() => {});
+            },
             params.resourceType === 'Document' ? 0 : 200,
         );
     });
@@ -288,7 +354,14 @@ try {
             throw new Error('The BookExport content script did not load');
         }),
     ]);
-    await send('Runtime.evaluate', { expression: 'void 0', contextId }, sessionId);
+    await send(
+        'Runtime.evaluate',
+        {
+            expression: metricsRun ? 'Math.random = () => 0.4' : 'void 0',
+            contextId,
+        },
+        sessionId,
+    );
     await send('Debugger.disable', {}, sessionId);
     let workerTargetId: string | undefined;
     for (let attempt = 0; attempt < 50 && !workerTargetId; attempt++) {
@@ -330,12 +403,12 @@ try {
     function action() {
         return send('Extensions.triggerAction', { id: extension, targetId: reader });
     }
-    async function panelNode(selector: string) {
+    async function panelNode(selector: string, target = sessionId) {
         for (let i = 0; i < 70; i++) {
             const { root } = await send<{ root: DomNode }>(
                 'DOM.getDocument',
                 { depth: -1, pierce: true },
-                sessionId,
+                target,
             );
             const host = root.children
                 ?.find((node) => node.nodeName === 'HTML')
@@ -345,14 +418,14 @@ try {
                 const { nodeId } = await send<{ nodeId: number }>(
                     'DOM.querySelector',
                     { nodeId: shadow.nodeId, selector },
-                    sessionId,
+                    target,
                 );
                 if (nodeId)
                     return (
                         await send<{ object: { objectId: string } }>(
                             'DOM.resolveNode',
                             { nodeId },
-                            sessionId,
+                            target,
                         )
                     ).object.objectId;
             }
@@ -362,199 +435,403 @@ try {
             'Panel not found: ' + selector + '\n' + JSON.stringify({ unhandled, consoleMessages }),
         );
     }
-    async function inspectPanel(selector: string, code: string) {
-        const objectId = await panelNode(selector);
+    async function inspectPanel(selector: string, code: string, target = sessionId) {
+        const objectId = await panelNode(selector, target);
         const { result } = await send<Evaluation>(
             'Runtime.callFunctionOn',
             { objectId, functionDeclaration: code, returnByValue: true },
-            sessionId,
+            target,
         );
         return result.value;
     }
-    async function matchPanel(selector: string, code: string) {
+    async function matchPanel(selector: string, code: string, target = sessionId) {
         for (let i = 0; i < 90; i++) {
-            if (await inspectPanel(selector, code)) return;
+            if (await inspectPanel(selector, code, target)) return;
             await delay(100);
         }
         throw Error('Timed out: ' + code);
     }
     await action();
     await matchPanel('main', 'function() { return this.getBoundingClientRect().width > 0; }');
-    assert.equal(
-        await inspectPanel('#book-title', 'function() { return this.textContent; }'),
-        'Fixture Book - Fixture Author',
-    );
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await Promise.race([
-        heldShard.promise,
-        delay(8000, undefined, { ref: false }).then(() => {
-            throw new Error('Chrome did not request the first shard');
-        }),
-    ]);
-    assert.equal(heldURL, '/web/book/chapter/e_0');
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await matchPanel('#status', "function() { return this.textContent === 'Export cancelled'; }");
-    assert.equal(
-        await Promise.race([abortedShard.promise, delay(3000, false, { ref: false })]),
-        true,
-        'Chrome must abort the in-flight chapter request',
-    );
+    if (metricsRun) {
+        const { browserMetrics } = await import('./fixtures/browser-metrics.ts');
+        const sample = browserMetrics(send, sessionId);
+        await inspectPanel(
+            '#status',
+            `function() {
+            const longTasks = [];
+            const phases = {};
+            this.bookExportMetrics = { longTasks, phases };
+            new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration)))
+                .observe({type: 'longtask'});
+            new MutationObserver(() => {
+                const label = this.textContent;
+                if (label.startsWith('Downloading chapters')) phases.chapters ??= performance.now();
+                if (label === 'Packaging EPUB…') phases.packaging ??= performance.now();
+                if (/^(EPUB sent|Saved|Export complete)/i.test(label)) phases.completed ??= performance.now();
+            }).observe(this, { childList: true });
+        }`,
+        );
+        const started = performance.now();
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        const result = await Promise.race([
+            completed.then(() => true),
+            delay(30000, false, { ref: false }),
+        ]);
+        const totalMs = performance.now() - started;
+        const metrics = await sample();
+        const status = await inspectPanel('#status', 'function() { return this.textContent; }');
+        assert.equal(result, true, String(status));
+        const panelMetrics = await inspectPanel(
+            '#status',
+            `function() {
+                const { longTasks, phases } = this.bookExportMetrics;
+                return {
+                    longTasks,
+                    packagingMs: phases.completed && phases.packaging
+                        ? Math.round(phases.completed - phases.packaging)
+                        : null
+                };
+            }`,
+        );
+        const file = join(downloadPath, 'Fixture Book.epub');
+        const size = (await stat(file)).size;
+        if (stress && !benchmark) {
+            // The queue reserves space for both incoming chunks and a contiguous response.
+            assert.match(String(status), /Resources: 8\. 4 resources unavailable\./);
+            assert.equal(network.held.requests.size, 12);
+            assert.equal(network.held.peak <= 4, true);
+            const paths = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' });
+            assert.equal(Array.from(paths.matchAll(/^OEBPS\/images\/image_\d+\.png$/gm)).length, 8);
+            execFileSync(process.env.EPUBCHECK_BIN || 'epubcheck', ['--failonwarnings', file], {
+                stdio: 'inherit',
+                timeout: 30000,
+            });
+        }
+        console.log(
+            JSON.stringify({
+                fixture: stress ? 'large-images' : 'shared-images',
+                totalMs: Math.round(totalMs),
+                chapterRequestMs: Math.round(chapterEndAt - chapterStartAt),
+                resourceMs: Math.round(network.held.lastResponseAt - network.held.firstRequestAt),
+                requests: Array.from(network.held.requests.values()).reduce((a, b) => a + b, 0),
+                unique: network.held.requests.size,
+                resourcePeak: network.held.peak,
+                resourceOverlap: overlapped,
+                epubBytes: size,
+                status,
+                panelMetrics,
+                ...metrics,
+            }),
+        );
+    } else {
+        assert.equal(
+            await inspectPanel('#book-title', 'function() { return this.textContent; }'),
+            'Fixture Book - Fixture Author',
+        );
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await Promise.race([
+            heldShard.promise,
+            delay(8000, undefined, { ref: false }).then(() => {
+                throw new Error('Chrome did not request the first shard');
+            }),
+        ]);
+        assert.equal(heldURL, '/web/book/chapter/e_0');
+        const other = await openReaderTab();
+        otherSession = other.sessionId;
+        await send('Network.enable', {}, otherSession);
+        await send(
+            'Page.navigate',
+            { url: 'https://weread.qq.com/web/reader/parallel' },
+            otherSession,
+        );
+        await waitFor(
+            "document.readyState === 'complete' && document.title.startsWith('Fixture Book')",
+            otherSession,
+        );
+        await send('Extensions.triggerAction', { id: extension, targetId: other.targetId });
+        await inspectPanel('.download-button', 'function() { this.click(); }', otherSession);
+        const otherRequest = await Promise.race([
+            otherShard.promise,
+            delay(5000, undefined, { ref: false }).then(() => {
+                throw new Error('The second tab did not start its chapter request');
+            }),
+        ]);
+        const otherAborted = Promise.withResolvers<boolean>();
+        events.push(({ method, params, sessionId }) => {
+            if (
+                sessionId === otherSession &&
+                method === 'Network.loadingFailed' &&
+                params.requestId === otherRequest
+            )
+                otherAborted.resolve(params.canceled === true);
+        });
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await matchPanel(
+            '#status',
+            "function() { return this.textContent === 'Export cancelled'; }",
+        );
+        assert.equal(
+            await Promise.race([abortedShard.promise, delay(3000, false, { ref: false })]),
+            true,
+            'Chrome must abort the in-flight chapter request',
+        );
 
-    heldShard = Promise.withResolvers<void>();
-    abortedShard = Promise.withResolvers<boolean>();
-    heldRequests.clear();
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await Promise.race([
-        heldShard.promise,
-        delay(8000, undefined, { ref: false }).then(() => {
-            throw new Error('Chrome did not restart the chapter request');
-        }),
-    ]);
-    await send(
-        'Runtime.evaluate',
-        { expression: "history.pushState({}, '', '/web/reader/other')" },
-        sessionId,
-    );
-    await matchPanel('main', 'function() { return !this.matches(":popover-open"); }');
-    assert.equal(
-        await Promise.race([abortedShard.promise, delay(3000, false, { ref: false })]),
-        true,
-        'Navigation must cancel the previous export',
-    );
-    await send(
-        'Runtime.evaluate',
-        { expression: "history.replaceState({}, '', '/web/reader/fixture')" },
-        sessionId,
-    );
-    await action();
+        assert.equal(
+            await inspectPanel(
+                '.download-button',
+                'function() { return this.textContent; }',
+                otherSession,
+            ),
+            'Cancel download',
+            'Cancelling the first tab must leave the second export running',
+        );
+        await inspectPanel('.download-button', 'function() { this.click(); }', otherSession);
+        assert.equal(
+            await Promise.race([otherAborted.promise, delay(3000, false, { ref: false })]),
+            true,
+        );
+        await send('Target.closeTarget', { targetId: other.targetId });
+        console.log('Two reader tabs maintain independent exports.');
 
-    holdFirstShard = false;
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await until(() => network.held.active === 4, 'waiting for four held downloads');
-    const cancelStarted = performance.now();
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await matchPanel('#status', "function() { return this.textContent === 'Export cancelled'; }");
-    await until(
-        () => network.held.aborted === 4 && network.held.active === 0,
-        'waiting for sockets to close',
-    );
-    console.log(
-        'Resource cancellation took ' + Math.round(performance.now() - cancelStarted) + ' ms.',
-    );
-    assert.equal(
-        Array.from(network.held.requests.values()).reduce((a, b) => a + b, 0),
-        4,
-    );
-    network.held.requests.clear();
-    network.held.hold = false;
-    network.held.peak = 0;
-    chapterEnds = 0;
-    overlapped = false;
-    await inspectPanel(
-        'progress',
-        `function() {
+        heldShard = Promise.withResolvers<void>();
+        abortedShard = Promise.withResolvers<boolean>();
+        heldRequests.clear();
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await Promise.race([
+            heldShard.promise,
+            delay(8000, undefined, { ref: false }).then(() => {
+                throw new Error('Chrome did not restart the chapter request');
+            }),
+        ]);
+        await send(
+            'Runtime.evaluate',
+            { expression: "history.pushState({}, '', '/web/reader/other')" },
+            sessionId,
+        );
+        await matchPanel('main', 'function() { return !this.matches(":popover-open"); }');
+        assert.equal(
+            await Promise.race([abortedShard.promise, delay(3000, false, { ref: false })]),
+            true,
+            'Navigation must cancel the previous export',
+        );
+        await send(
+            'Runtime.evaluate',
+            { expression: "history.replaceState({}, '', '/web/reader/fixture')" },
+            sessionId,
+        );
+        await action();
+
+        holdFirstShard = false;
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await until(() => network.held.active === 4, 'waiting for four held downloads');
+        const cancelStarted = performance.now();
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await matchPanel(
+            '#status',
+            "function() { return this.textContent === 'Export cancelled'; }",
+        );
+        await until(
+            () => network.held.aborted === 4 && network.held.active === 0,
+            'waiting for sockets to close',
+        );
+        console.log(
+            'Resource cancellation took ' + Math.round(performance.now() - cancelStarted) + ' ms.',
+        );
+        assert.equal(
+            Array.from(network.held.requests.values()).reduce((a, b) => a + b, 0),
+            4,
+        );
+        network.held.requests.clear();
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await until(
+            () => network.held.active === 4,
+            'waiting for resources before stopping the worker',
+        );
+        await send('ServiceWorker.enable', {}, sessionId);
+        network.held.hold = false;
+        await send('ServiceWorker.stopAllWorkers', {}, sessionId);
+        for (let attempt = 0; attempt < 50; attempt++) {
+            const { targetInfos } = await send<{ targetInfos: { targetId: string }[] }>(
+                'Target.getTargets',
+            );
+            if (!targetInfos.some((target) => target.targetId === workerTargetId)) break;
+            if (attempt === 49)
+                assert.fail('Chrome did not terminate the extension Service Worker');
+            await delay(100);
+        }
+        await until(
+            () => network.held.aborted >= 8,
+            'waiting for worker termination to close resource sockets',
+        );
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await matchPanel(
+            '#status',
+            "function() { return this.textContent === 'Export cancelled'; }",
+        );
+        await until(
+            () => network.held.active === 0,
+            'waiting for the restarted worker to release resources',
+        );
+        console.log('Service Worker termination disconnects in-flight resource requests.');
+
+        await inspectPanel(
+            '#status',
+            `function() {
+            const observer = new MutationObserver(() => {
+                if (this.textContent !== 'Packaging EPUB…') return;
+                observer.disconnect();
+                this.dataset.packagingCancelled = 'yes';
+                this.getRootNode().querySelector('.download-button').click();
+            });
+            observer.observe(this, { childList: true });
+        }`,
+        );
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        for (let attempt = 0; attempt < 160; attempt++) {
+            if (
+                await inspectPanel(
+                    '#status',
+                    "function() { return this.dataset.packagingCancelled === 'yes' && this.textContent === 'Export cancelled'; }",
+                )
+            )
+                break;
+            if (attempt === 159) assert.fail('Cancellation during packaging did not settle');
+            await delay(100);
+        }
+        assert.equal(
+            downloadStarts,
+            0,
+            'Cancellation during packaging must prevent download handoff',
+        );
+        console.log('Cancelling from the panel during packaging prevents download handoff.');
+        network.held.requests.clear();
+        network.held.hold = false;
+        network.held.peak = 0;
+        chapterEnds = 0;
+        overlapped = false;
+        await inspectPanel(
+            'progress',
+            `function() {
         new MutationObserver((changes) => {
             if (changes.some(change => change.attributeName === 'value')
                 && this.hasAttribute('value') && this.value === this.max) this.dataset.completed = 'yes';
         }).observe(this, { attributes: true });
     }`,
-    );
-    await inspectPanel('.download-button', 'function() { this.click(); }');
-    await matchPanel(
-        '.download-button',
-        "function() { return this.textContent === 'Cancel download'; }",
-    );
-    await inspectPanel('.close', 'function() { this.click(); }');
-    await matchPanel('main', 'function() { return this.getBoundingClientRect().width === 0; }');
-    await action();
-    await matchPanel(
-        '.download-button',
-        "function() { return this.getBoundingClientRect().width > 0 && this.textContent === 'Cancel download'; }",
-    );
-    await matchPanel(
-        '#status',
-        "function() { return this.textContent.startsWith('EPUB sent to browser downloads.'); }",
-    );
-    await Promise.race([
-        completed,
-        delay(5000, undefined, { ref: false }).then(() => {
-            throw new Error('Chrome did not finish downloading the EPUB');
-        }),
-    ]);
-    execFileSync(
-        process.env.EPUBCHECK_BIN || 'epubcheck',
-        ['--failonwarnings', join(downloadPath, 'Fixture Book.epub')],
-        { stdio: 'inherit', timeout: 20000 },
-    );
-    const file = join(downloadPath, 'Fixture Book.epub');
-    const chapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0001.xhtml'], {
-        encoding: 'utf8',
-    });
-    assert.equal(
-        network.held.requests.get('shared.png'),
-        1,
-        'One request for a resource shared by chapters and CSS',
-    );
-    assert.equal(
-        network.held.requests.get('direct.png'),
-        1,
-        'An approved CDN may be addressed directly',
-    );
-    assert.equal(
-        network.held.requests.has('redirect-target.png'),
-        false,
-        'Cross-origin redirects must not be followed',
-    );
-    assert.equal(network.held.credentials, 0);
-    assert.ok(
-        network.held.streamed > 16 * 1024 * 1024,
-        'Exercise the streaming limit without Content-Length',
-    );
-    assert.equal(network.held.peak, 4);
-    assert.equal(overlapped, true, 'Resources start before the final chapter response');
-    assert.equal(
-        await inspectPanel('progress', 'function() { return this.dataset.completed; }'),
-        'yes',
-    );
-    assert.equal(Array.from(chapter.matchAll(/src="\.\.\/images\/image_1\.png"/g)).length, 2);
-    assert.ok(chapter.includes('[Illustration: Unavailable &amp; missing]'));
-    const nextChapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0002.xhtml'], {
-        encoding: 'utf8',
-    });
-    assert.ok(nextChapter.includes('src="../images/image_1.png"'));
-    assert.ok(chapter.includes('<title>\u7248\u6743\u4fe1\u606f</title>'));
-    assert.ok(chapter.includes('href="#chapter-start"'));
-    assert.doesNotMatch(chapter, /<script/);
-    assert.ok(chapter.includes('href="chapter_0002.xhtml#chapter-start"'));
-    assert.match(chapter, /<style>[^<]*embedded[^<]*\.\.\/images\/image_1\.png/);
-    assert.match(chapter, /style="[^"]*\.\.\/images\/image_1\.png/);
-    assert.ok(chapter.includes('[Illustration: Oversized image]'));
-    assert.ok(chapter.includes('[Illustration: Approved redirect]'));
-    assert.ok(chapter.includes('[Illustration: Blocked redirect]'));
-    assert.ok(chapter.includes('class="original-layout"'));
-    assert.ok(chapter.includes('lang="en-US"'));
-    assert.equal(Array.from(chapter.matchAll(/<h1(?:\s[^>]*)?>/g)).length, 1);
-    assert.doesNotMatch(chapter, /denied\.invalid|<animate/);
-    assert.match(
-        String(await inspectPanel('#status', 'function() { return this.textContent; }')),
-        /9 resources unavailable/,
-    );
-    const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
-    assert.ok(opf.includes('properties="svg mathml"'));
-    assert.ok(opf.includes('<dc:language>en-US</dc:language>'));
-    const nav = execFileSync('unzip', ['-p', file, 'OEBPS/nav.xhtml'], { encoding: 'utf8' });
-    assert.match(
-        nav,
-        /chapter_0001\.xhtml"[^<]*>[^<]+<\/a><ol><li><a href="text\/chapter_0002\.xhtml"/,
-    );
-    const css = execFileSync('unzip', ['-p', file, 'OEBPS/styles/weread.css'], {
-        encoding: 'utf8',
-    });
-    assert.ok(css.includes('margin: 1em 0'));
-    assert.ok(css.includes('../images/image_1.png'));
-    assert.doesNotMatch(css, /example\.invalid/);
-    assert.deepEqual(unhandled, [], 'No unhandled Chrome exceptions');
-    console.log('Chrome saved a valid EPUB after cancelling and restarting the download.');
+        );
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await matchPanel(
+            '.download-button',
+            "function() { return this.textContent === 'Cancel download'; }",
+        );
+        await inspectPanel('.close', 'function() { this.click(); }');
+        await matchPanel('main', 'function() { return this.getBoundingClientRect().width === 0; }');
+        await action();
+        await matchPanel(
+            '.download-button',
+            "function() { return this.getBoundingClientRect().width > 0 && this.textContent === 'Cancel download'; }",
+        );
+        await matchPanel(
+            '#status',
+            "function() { return this.textContent.startsWith('EPUB sent to browser downloads.'); }",
+        );
+        await Promise.race([
+            completed,
+            delay(5000, undefined, { ref: false }).then(() => {
+                throw new Error('Chrome did not finish downloading the EPUB');
+            }),
+        ]);
+        execFileSync(
+            process.env.EPUBCHECK_BIN || 'epubcheck',
+            ['--failonwarnings', join(downloadPath, 'Fixture Book.epub')],
+            { stdio: 'inherit', timeout: 20000 },
+        );
+        const file = join(downloadPath, 'Fixture Book.epub');
+        const chapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0001.xhtml'], {
+            encoding: 'utf8',
+        });
+        assert.equal(
+            network.held.requests.get('shared.png'),
+            1,
+            'One request for a resource shared by chapters and CSS',
+        );
+        assert.equal(
+            network.held.requests.get('direct.png'),
+            1,
+            'An approved CDN may be addressed directly',
+        );
+        assert.equal(
+            network.held.requests.has('redirect-target.png'),
+            false,
+            'Cross-origin redirects must not be followed',
+        );
+        assert.equal(network.held.credentials, 0);
+        assert.ok(
+            network.held.streamed > 16 * 1024 * 1024,
+            'Exercise the streaming limit without Content-Length',
+        );
+        assert.equal(network.held.peak, 4);
+        assert.equal(overlapped, true, 'Resources start before the final chapter response');
+        assert.equal(
+            await inspectPanel('progress', 'function() { return this.dataset.completed; }'),
+            'yes',
+        );
+        assert.equal(Array.from(chapter.matchAll(/src="\.\.\/images\/image_1\.png"/g)).length, 2);
+        assert.ok(chapter.includes('[Illustration: Unavailable &amp; missing]'));
+        const nextChapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0002.xhtml'], {
+            encoding: 'utf8',
+        });
+        assert.ok(nextChapter.includes('src="../images/image_1.png"'));
+        assert.match(nextChapter, /class="html-layout" id="html-start"/);
+        assert.match(nextChapter, /lang="fr"/);
+        assert.match(nextChapter, /ordinary HTML\.<br[^>]*\/>Second line\./);
+        assert.doesNotMatch(nextChapter, /parsererror|parser-only/);
+        assert.equal(network.held.requests.has('parser-only.png'), false);
+        assert.match(chapter, /href="#missing-image"/);
+        assert.match(chapter, /href="chapter_0002.xhtml#missing-image"/);
+        assert.match(nextChapter, /<span[^>]*id="missing-image"[^>]*>\[Illustration:/);
+        assert.ok(chapter.includes('<title>\u7248\u6743\u4fe1\u606f</title>'));
+        assert.ok(chapter.includes('href="#chapter-start"'));
+        assert.doesNotMatch(chapter, /<script/);
+        assert.ok(chapter.includes('href="chapter_0002.xhtml#chapter-start"'));
+        assert.match(chapter, /<style>[^<]*embedded[^<]*\.\.\/images\/image_1\.png/);
+        assert.match(chapter, /style="[^"]*\.\.\/images\/image_1\.png/);
+        assert.ok(chapter.includes('[Illustration: Oversized image]'));
+        assert.ok(chapter.includes('[Illustration: Approved redirect]'));
+        assert.ok(chapter.includes('[Illustration: Blocked redirect]'));
+        assert.ok(chapter.includes('class="original-layout"'));
+        assert.ok(chapter.includes('lang="en-US"'));
+        assert.equal(Array.from(chapter.matchAll(/<h1(?:\s[^>]*)?>/g)).length, 1);
+        assert.doesNotMatch(chapter, /denied\.invalid|<animate/);
+        assert.match(
+            String(await inspectPanel('#status', 'function() { return this.textContent; }')),
+            /9 resources unavailable/,
+        );
+        const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
+        assert.ok(opf.includes('properties="svg mathml"'));
+        assert.ok(opf.includes('<dc:language>en-US</dc:language>'));
+        const nav = execFileSync('unzip', ['-p', file, 'OEBPS/nav.xhtml'], { encoding: 'utf8' });
+        assert.match(
+            nav,
+            /chapter_0001\.xhtml"[^<]*>[^<]+<\/a><ol><li><a href="text\/chapter_0002\.xhtml"/,
+        );
+        const css = execFileSync('unzip', ['-p', file, 'OEBPS/styles/weread.css'], {
+            encoding: 'utf8',
+        });
+        assert.ok(css.includes('margin: 1em 0'));
+        assert.ok(css.includes('../images/image_1.png'));
+        assert.match(
+            css,
+            /\.responsive\s*\{[^}]*image-set\(url\("\.\.\/images\/image_\d+\.png"\) 1(?:x|dppx)\)/,
+        );
+        assert.doesNotMatch(css, /\.unused\s*\{[^}]*url\(/);
+        assert.equal(network.held.requests.get('orphan.png'), 1);
+        assert.equal(network.held.requests.get('responsive.png'), 1);
+        assert.equal(Array.from(opf.matchAll(/media-type="image\/png"/g)).length, 7);
+        assert.doesNotMatch(css, /example\.invalid/);
+        assert.deepEqual(unhandled, [], 'No unhandled Chrome exceptions');
+        console.log('Chrome saved a valid EPUB after cancelling and restarting the download.');
+    }
 } finally {
     clearTimeout(timeout);
     chrome.kill();

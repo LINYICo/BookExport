@@ -1,6 +1,6 @@
 {
     "name": "bookexport",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "private": true,
     "license": "MIT",
     "type": "module",
@@ -13,6 +13,7 @@
         "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.tools.json",
         "test": "node --test tests/unit/*.test.ts",
         "test:chrome": "node tests/chrome.test.ts",
+        "benchmark": "node tests/chrome.test.ts --benchmark",
         "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:chrome",
         "release": "pnpm build && node scripts/release.ts"
     },

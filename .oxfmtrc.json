@@ -1,5 +1,5 @@
 {
     "tabWidth": 4,
     "singleQuote": true,
-    "ignorePatterns": ["dist/", ".scratch/"]
+    "ignorePatterns": ["extension/", ".scratch/"]
 }

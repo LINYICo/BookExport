@@ -8,9 +8,19 @@ const CRC_TABLE = (() => {
     return table;
 })();
 
-function crc32(bytes: Uint8Array) {
+const checksumChunk = 4 * 1024 * 1024;
+
+async function crc32(bytes: Uint8Array, signal?: AbortSignal) {
     let crc = 0xffffffff;
-    for (const byte of bytes) crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+    for (let start = 0; start < bytes.length; start += checksumChunk) {
+        const end = Math.min(start + checksumChunk, bytes.length);
+        for (let index = start; index < end; index++) {
+            const byte = bytes[index] ?? 0;
+            crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+        }
+        if (end < bytes.length && globalThis.scheduler) await scheduler.yield();
+        signal?.throwIfAborted();
+    }
     return (crc ^ 0xffffffff) >>> 0;
 }
 
@@ -52,7 +62,7 @@ export async function buildZip(entries: Iterable<ZipEntry>, now: number, signal?
         const nameBytes = encoder.encode(entry.name);
         if (nameBytes.length > 0xffff || entry.data.length >= 0xffffffff)
             throw new Error('A file exceeds the ZIP size limit.');
-        const checksum = crc32(entry.data);
+        const checksum = await crc32(entry.data, signal);
         let method = 0;
         let fileData = entry.data;
         if (entry.compress !== false && entry.data.length > 0) {
@@ -90,7 +100,11 @@ export async function buildZip(entries: Iterable<ZipEntry>, now: number, signal?
         localView.setUint32(22, entry.data.length, true);
         localView.setUint16(26, nameBytes.length, true);
         local.set(nameBytes, 30);
-        chunks.push(local, fileData);
+        // Freeze large entries individually so archive assembly cannot copy all of them at once.
+        if (fileData.byteLength > checksumChunk) {
+            chunks.push(local, new Blob([fileData]));
+            if (globalThis.scheduler) await scheduler.yield();
+        } else chunks.push(local, fileData);
 
         const central = new Uint8Array(46 + nameBytes.length);
         const centralView = new DataView(central.buffer);

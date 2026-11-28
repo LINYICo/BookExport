@@ -168,6 +168,8 @@ export function createEbookExport({
             const outputSerializer = serializer ?? new XMLSerializer();
             const documents = chapterIndex(chapters);
             const completed: EpubChapter[] = [];
+            const usedPaths = new Set<string>();
+            const use = (path: string) => usedPaths.add(path);
             for (const [index, chapter] of chapters.entries()) {
                 signal.throwIfAborted();
                 const body = parser.parseFromString(
@@ -175,21 +177,19 @@ export function createEbookExport({
                     'application/xhtml+xml',
                 ).documentElement;
                 if (body.localName !== 'body') throw new Error('Could not prepare chapter XHTML.');
-                rewriteChapterLinks(body, index, chapters, documents);
                 const embeddedCss = chapterResources(
                     body,
                     chapter.embeddedCss,
                     (value, imageOnly) => queue.path(value, chapter.base, imageOnly),
-                    true,
+                    use,
                 );
+                rewriteChapterLinks(body, index, chapters, documents);
                 const attributes = Object.fromEntries(
                     Array.from(body.attributes, ({ name, value }) => [name, value]),
                 );
-                const first = body.firstElementChild;
-                const hasHeading =
-                    !!first &&
-                    /^h[1-6]$/.test(first.localName) &&
-                    first.textContent.trim() === chapter.title.trim();
+                const hasHeading = Array.from(body.querySelectorAll('h1, h2, h3, h4, h5, h6')).some(
+                    (heading) => heading.textContent.trim() === chapter.title.trim(),
+                );
                 const source = Array.from(body.childNodes, (node) =>
                     outputSerializer.serializeToString(node),
                 ).join('');
@@ -207,8 +207,8 @@ export function createEbookExport({
                 chapter.markup = '';
                 if (index % 16 === 0) await scheduler.yield();
             }
-            css = rewriteCss(css, (value) => queue.path(value, cssBase));
-            const { assets, unavailable } = queue.result();
+            css = rewriteCss(css, (value) => queue.path(value, cssBase), false, use);
+            const { assets, unavailable } = queue.result(usedPaths);
             const archive = await buildEpub({
                 title: book.title,
                 author: book.author,
