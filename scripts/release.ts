@@ -25,6 +25,7 @@ try {
             'background.js',
             'content.js',
             'icons',
+            'licenses',
             '-x',
             '*.DS_Store',
             '*.map',

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.3 - 2026-11-28
+
+### Changed
+
+- Use a bundled Teko wordmark in a narrower download panel.
+- Show progress without chapter-count text and use in-place completion and retry states.
+- Skip the final resource cooldown once every request has started.
+
 ## v0.4.2 - 2026-11-28
 
 ### Fixed

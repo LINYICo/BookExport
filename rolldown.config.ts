@@ -5,7 +5,7 @@ export default [
         input: 'src/content.ts',
         platform: 'browser',
         transform: { target: 'esnext' },
-        moduleTypes: { '.css': 'text' },
+        moduleTypes: { '.css': 'text', '.woff2': 'base64' },
         output: {
             file: 'extension/content.js',
             format: 'iife',

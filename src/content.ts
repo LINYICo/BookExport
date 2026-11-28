@@ -54,8 +54,8 @@ chrome.runtime.onMessage.addListener((message: { type?: string }, sender) => {
         }
         exporter.toggle();
     });
+    if (panel.toggle()) exporter = undefined;
     publish();
-    panel.toggle();
 });
 
 window.navigation.addEventListener('currententrychange', () => {

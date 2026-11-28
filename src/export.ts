@@ -11,19 +11,27 @@ import {
 import { type FetchAsset } from './resource.ts';
 import { createWeReadClient, wait } from './weread/client.ts';
 
-type State =
-    | {
-          stage:
-              | 'idle'
-              | 'preparing'
-              | 'images'
-              | 'packaging'
-              | 'completed'
-              | 'cancelled'
-              | 'failed';
-          message: string;
-      }
-    | { stage: 'chapters'; message: string; done: number; total: number };
+type Stage =
+    | 'idle'
+    | 'preparing'
+    | 'chapters'
+    | 'images'
+    | 'packaging'
+    | 'completed'
+    | 'cancelled'
+    | 'failed';
+type State = { stage: Stage; message: string; warning?: string };
+
+export type ExportView = {
+    stage: Stage | 'cancelling';
+    running: boolean;
+    disabled: boolean;
+    done: number;
+    total: number;
+    message: string;
+    title: string;
+    warning: string;
+};
 
 interface Options {
     win: { location: Pick<Location, 'href' | 'pathname'> };
@@ -50,6 +58,8 @@ export function createEbookExport({
 }: Options) {
     let state: State = { stage: 'idle', message: '' };
     let controller: AbortController | undefined;
+    let done = 0;
+    let total = 0;
     const available = () => win.location.pathname.startsWith('/web/reader/');
 
     function update(next: State) {
@@ -57,16 +67,18 @@ export function createEbookExport({
         onStateChange();
     }
 
-    function viewState() {
+    function viewState(): ExportView {
         const running = controller !== undefined;
-        const message = controller?.signal.aborted ? 'Cancelling download…' : state.message;
+        const stage = controller?.signal.aborted ? 'cancelling' : state.stage;
+        const message = stage === 'cancelling' ? 'Cancelling download…' : state.message;
         return {
+            stage,
             running,
-            disabled: running ? !!controller?.signal.aborted : !available(),
-            done: state.stage === 'chapters' ? state.done : 0,
-            total: state.stage === 'chapters' ? state.total : 0,
-            chapterProgress: state.stage === 'chapters',
+            disabled: stage === 'cancelling' || !available(),
+            done,
+            total,
             message,
+            warning: state.warning ?? '',
             title: message || 'Save a personal copy of this book as an EPUB',
         };
     }
@@ -84,6 +96,9 @@ export function createEbookExport({
             concurrency: imageConcurrency,
         });
         let where = '';
+        let result: State;
+        done = 0;
+        total = 0;
         update({ stage: 'preparing', message: 'Preparing download…' });
 
         try {
@@ -98,18 +113,10 @@ export function createEbookExport({
             let retainedText = 0;
             let css = '';
             let cssBase = readerUrl;
-            const chapterProgress = () =>
-                update({
-                    stage: 'chapters',
-                    done: chapters.length,
-                    total: catalog.length,
-                    message:
-                        'Downloading chapters (' + chapters.length + ' of ' + catalog.length + ')',
-                });
-            chapterProgress();
+            total = catalog.length;
+            update({ stage: 'chapters', message: 'Downloading chapters' });
             for (const chapter of catalog) {
                 signal.throwIfAborted();
-                const done = chapters.length;
                 if (done > 0) {
                     await wait(chapterDelayMs(), signal);
                     try {
@@ -142,8 +149,9 @@ export function createEbookExport({
                     ]),
                 });
                 parentIndices.set(String(chapter.chapterUid), done);
+                done = chapters.length;
+                onStateChange();
                 await queue.add(references, parsed.base);
-                chapterProgress();
                 if (!css) {
                     css = await client.css(book, chapter);
                     cssBase = parsed.base;
@@ -231,18 +239,20 @@ export function createEbookExport({
                 anchor.remove();
                 setTimeout(() => URL.revokeObjectURL(url), 10000);
             }
-            state = {
+            const warning = unavailable ? unavailable + ' resources unavailable.' : '';
+            result = {
                 stage: 'completed',
+                warning,
                 message:
                     'EPUB sent to browser downloads. Chapters: ' +
                     chapters.length +
                     '. Resources: ' +
                     assets.length +
                     '.' +
-                    (unavailable ? ' ' + unavailable + ' resources unavailable.' : ''),
+                    (warning ? ' ' + warning : ''),
             };
         } catch (error) {
-            state = signal.aborted
+            result = signal.aborted
                 ? { stage: 'cancelled', message: 'Export cancelled' }
                 : {
                       stage: 'failed',
@@ -255,8 +265,8 @@ export function createEbookExport({
             job.abort();
             await queue.drain();
             controller = undefined;
-            onStateChange();
         }
+        update(result);
     }
 
     function toggle() {

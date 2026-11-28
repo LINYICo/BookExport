@@ -248,6 +248,7 @@ try {
     const [style] = encodeShards(metricsRun ? 'p { margin: 1em 0; }' : stylesheet, 1);
     const paths = ['e_0', 'e_1', 'e_3'];
     let holdFirstShard = !metricsRun;
+    let failSecondChapter = false;
     if (metricsRun) network.held.hold = false;
     let chapterEnds = 0;
     let chapterStartAt = 0;
@@ -297,6 +298,7 @@ try {
         const chapterId = params.request.postData
             ? JSON.parse(params.request.postData).c
             : undefined;
+        const fail = failSecondChapter && api === 'e_0' && chapterId === wereadE('2');
         const shard =
             api === 'e_2'
                 ? style
@@ -331,7 +333,7 @@ try {
                     'Fetch.fulfillRequest',
                     {
                         requestId: params.requestId,
-                        responseCode: 200,
+                        responseCode: fail ? 503 : 200,
                         responseHeaders: [
                             { name: 'Content-Type', value: 'text/html; charset=utf-8' },
                         ],
@@ -525,6 +527,31 @@ try {
             }),
         );
     } else {
+        await send(
+            'Emulation.setEmulatedMedia',
+            {
+                features: [{ name: 'prefers-color-scheme', value: 'light' }],
+            },
+            sessionId,
+        );
+        assert.equal(
+            await inspectPanel('main', 'function() { return this.getBoundingClientRect().width; }'),
+            318,
+        );
+        assert.equal(
+            await inspectPanel(
+                'header',
+                'function() { return getComputedStyle(this).borderBottomWidth; }',
+            ),
+            '0px',
+        );
+        await matchPanel(
+            '.product',
+            `function() {
+            return getComputedStyle(this).fontFamily.includes('BookExport Teko') &&
+                [...document.fonts].some(font => font.family === 'BookExport Teko' && font.status === 'loaded');
+        }`,
+        );
         assert.equal(
             await inspectPanel('#book-title', 'function() { return this.textContent; }'),
             'Fixture Book - Fixture Author',
@@ -536,6 +563,24 @@ try {
                 throw new Error('Chrome did not request the first shard');
             }),
         ]);
+        assert.equal(
+            await inspectPanel(
+                '#status',
+                `function() {
+                const rect = this.getBoundingClientRect();
+                return this.textContent === 'Downloading chapters' && rect.width === 1 && rect.height === 1;
+            }`,
+            ),
+            true,
+            'Chapter progress uses the bar without a visible status label',
+        );
+        assert.equal(
+            await inspectPanel(
+                '.progress-track',
+                'function() { return this.getBoundingClientRect().height; }',
+            ),
+            6,
+        );
         assert.equal(heldURL, '/web/book/chapter/e_0');
         const other = await openReaderTab();
         otherSession = other.sessionId;
@@ -705,6 +750,30 @@ try {
             'Cancellation during packaging must prevent download handoff',
         );
         console.log('Cancelling from the panel during packaging prevents download handoff.');
+        failSecondChapter = true;
+        await inspectPanel('.download-button', 'function() { this.click(); }');
+        await matchPanel(
+            '.download-button',
+            "function() { return this.textContent === 'Retry download' && !this.disabled; }",
+        );
+        assert.equal(
+            await inspectPanel('progress', 'function() { return this.value / this.max; }'),
+            0.5,
+            'Failure retains the progress shown before the failing chapter',
+        );
+        assert.equal(
+            await inspectPanel(
+                '.progress-fill',
+                `function() {
+                const style = getComputedStyle(this);
+                return style.backgroundColor === 'rgb(206, 57, 72)' &&
+                    style.animationName === 'none' && style.transitionProperty === 'none';
+            }`,
+            ),
+            true,
+            'The failed progress bar is red and still',
+        );
+        failSecondChapter = false;
         network.held.requests.clear();
         network.held.hold = false;
         network.held.peak = 0;
@@ -734,6 +803,27 @@ try {
         await matchPanel(
             '#status',
             "function() { return this.textContent.startsWith('EPUB sent to browser downloads.'); }",
+        );
+        assert.equal(
+            await inspectPanel(
+                '.download-result',
+                'function() { return !this.hidden && this.textContent === "Export complete"; }',
+            ),
+            true,
+        );
+        assert.equal(
+            await inspectPanel('.download-button', 'function() { return this.hidden; }'),
+            true,
+        );
+        assert.equal(
+            await inspectPanel(
+                '.resource-warning',
+                'function() { return this.hidden ? "" : this.textContent; }',
+            ),
+            '9 resources unavailable.',
+        );
+        console.log(
+            'The popup has the new width and bundled font, and retry restores a successful export.',
         );
         await Promise.race([
             completed,

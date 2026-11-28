@@ -32,6 +32,9 @@ export function createAssetQueue(
     let retained = 0;
     let reserved = 0;
     let references = 0;
+    let draining = false;
+    const noMoreRequests = new AbortController();
+    const pacing = AbortSignal.any([signal, noMoreRequests.signal]);
 
     function fail(status: ResourceFailure) {
         if (status !== 'cancelled') failures.set(status, (failures.get(status) ?? 0) + 1);
@@ -58,6 +61,7 @@ export function createAssetQueue(
             });
             active.add(task);
         }
+        if (draining && !pending.length) noMoreRequests.abort();
     }
 
     async function download(job: Job, limit: number, reservation: number) {
@@ -83,10 +87,11 @@ export function createAssetQueue(
         } finally {
             reserved -= reservation;
         }
-        if (!signal.aborted) await wait(imageDelayMs(), signal).catch(() => {});
+        if (!pacing.aborted) await wait(imageDelayMs(), pacing).catch(() => {});
     }
 
     async function add(values: Iterable<string>, base: string) {
+        if (draining) throw new Error('The resource queue is closed.');
         for (const value of values) {
             signal.throwIfAborted();
             references++;
@@ -108,6 +113,8 @@ export function createAssetQueue(
     }
 
     async function drain() {
+        draining = true;
+        if (!pending.length) noMoreRequests.abort();
         while (active.size) await Promise.all(active);
         if (signal.aborted) pending.length = 0;
     }

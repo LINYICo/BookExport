@@ -56,6 +56,26 @@ test('the book queue enforces its bound and assigns paths in discovery order', a
     assert.equal(queue.result().unique, 7);
 });
 
+test(
+    'draining a finished resource queue skips the final cooldown',
+    { timeout: 1000 },
+    async (t) => {
+        const cooling = Promise.withResolvers<void>();
+        const queue = createAssetQueue(
+            async () => ({ status: 'downloaded', data: png }),
+            t.signal,
+            () => {
+                cooling.resolve();
+                return 60000;
+            },
+        );
+        await queue.add(['one.png'], base);
+        await cooling.promise;
+        await queue.drain();
+        assert.equal(queue.result().assets.length, 1);
+    },
+);
+
 test('resource reservations cap reads and preserve other images when the budget is reached', async () => {
     const limits: number[] = [];
     const queue = createAssetQueue(

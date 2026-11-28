@@ -800,7 +800,10 @@ for (const step of ['reader request', 'chapter response body']) {
             const result = await finished.promise.finally(() => clearTimeout(keepAlive));
             assert.equal(pendingSignals[0]?.aborted, true);
             assert.equal(result.disabled, false);
-            assert.match(result.message, /did not respond in time.*Download EPUB to try again/);
+            assert.equal(result.stage, 'failed');
+            assert.equal(result.done, 0);
+            assert.equal(result.total, step === 'reader request' ? 0 : 1);
+            assert.match(result.message, /did not respond in time.*Retry download/);
         },
     );
 }

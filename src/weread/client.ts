@@ -159,7 +159,7 @@ export function createWeReadClient(
                 throw new Error('The WeRead response exceeded the size limit.');
             if (deadline.aborted)
                 throw new Error(
-                    'WeRead did not respond in time. Click Download EPUB to try again.',
+                    'WeRead did not respond in time. Choose Retry download to try again.',
                 );
             throw error;
         }

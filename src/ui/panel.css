@@ -3,6 +3,11 @@ main {
     --muted: light-dark(#5e6879, #b9c4d5);
     --line: light-dark(#eaedf2, #344053);
     --blue: light-dark(#1763d4, #2b70dc);
+    --progress-track: light-dark(#e9eff9, #344053);
+    --progress-fill: #428df5;
+    --success: light-dark(#16734f, #7be4b3);
+    --danger: light-dark(#ce3948, #ff7683);
+    box-sizing: border-box;
     position: fixed;
     inset: 12px 12px auto auto;
     margin: 0;
@@ -10,7 +15,7 @@ main {
     border: 1px solid var(--line);
     border-radius: 15px;
     box-shadow: 0 8px 30px #17203330;
-    width: min(324px, calc(100vw - 26px));
+    width: min(318px, calc(100vw - 24px));
     max-height: calc(100vh - 26px);
     overflow: auto;
     font:
@@ -19,7 +24,7 @@ main {
     color: light-dark(#172033, #e9eff9);
     background: light-dark(#fff, #202938);
 }
-[hidden] {
+main [hidden] {
     display: none;
 }
 header {
@@ -27,17 +32,18 @@ header {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 9px 12px 9px 16px;
-    border-bottom: 1px solid var(--line);
+    padding: 9px 10px 6px 14px;
 }
 h1,
 p {
     margin: 0;
 }
 .product {
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 650;
+    font:
+        600 25px/1 'BookExport Teko',
+        'Arial Narrow',
+        sans-serif;
+    letter-spacing: 0.015em;
 }
 h1 {
     font-size: 14px;
@@ -88,13 +94,13 @@ button:focus-visible {
 
 .download {
     display: grid;
-    gap: 12px;
-    padding: 14px 16px 16px;
+    gap: 10px;
+    padding: 0 14px 14px;
 }
 .preview {
     display: grid;
     place-items: center;
-    min-height: 112px;
+    min-height: 108px;
     border: 1px solid light-dark(#f3e7ca, #5b4d33);
     border-radius: 12px;
     background: radial-gradient(
@@ -133,42 +139,62 @@ button:focus-visible {
     box-sizing: border-box;
 }
 
-#status {
-    color: var(--muted);
-    font-size: 12px;
-    overflow-wrap: anywhere;
-}
-#status:empty {
+.visually-hidden {
     position: absolute;
-    width: 1px;
-    height: 1px;
+    inline-size: 1px;
+    block-size: 1px;
+    padding: 0;
+    margin: -1px;
     overflow: hidden;
-}
-.progress {
-    appearance: none;
-    width: 100%;
-    height: 7px;
-    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
     border: 0;
+}
+.progress-track {
+    position: relative;
+    height: 6px;
+    margin-block: 2px 0;
+    overflow: hidden;
     border-radius: 99px;
-    background: light-dark(#e9eff9, #344053);
+    background: var(--progress-track);
 }
-.progress::-webkit-progress-bar {
-    background: transparent;
-}
-.progress::-webkit-progress-value {
+.progress-fill {
+    display: block;
+    width: 100%;
+    height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, #247afa, #45a6fa);
-    transition: width 420ms cubic-bezier(0.2, 0.7, 0.25, 1);
+    background: var(--progress-fill);
+    transform: scaleX(var(--progress, 0));
+    transform-origin: left;
+    transition: transform 300ms cubic-bezier(0.2, 0.7, 0.25, 1);
 }
-.progress:indeterminate {
-    background: linear-gradient(90deg, transparent, #428df5, transparent) 0 0 / 40% 100% no-repeat
-        light-dark(#e9eff9, #344053);
-    animation: sweep 1.45s ease-in-out infinite alternate;
+.progress-track.indeterminate .progress-fill {
+    width: 36%;
+    background: linear-gradient(90deg, transparent, var(--progress-fill), transparent);
+    animation: sweep 1.35s ease-in-out infinite alternate;
+}
+main[data-stage='failed'] {
+    --progress-track: light-dark(#fbe5e8, #55313c);
+    --progress-fill: var(--danger);
+}
+main[data-stage='failed'] .progress-fill {
+    min-width: 12px;
+    width: calc(var(--progress, 0) * 100%);
+    transform: none;
+    transition: none;
+}
+main[data-stage='cancelling'] .progress-fill {
+    transition: none;
+}
+main[data-stage='completed'] {
+    --progress-fill: var(--success);
 }
 @keyframes sweep {
+    from {
+        transform: translateX(-25%);
+    }
     to {
-        background-position: 100% 0;
+        transform: translateX(200%);
     }
 }
 
@@ -200,12 +226,26 @@ button:focus-visible {
     cursor: default;
 }
 
+.download-result {
+    display: grid;
+    place-items: center;
+    min-height: 40px;
+    border-radius: 9px;
+    background: light-dark(#eff8f3, #293c3a);
+    color: var(--success);
+    font-weight: 650;
+}
+.resource-warning {
+    color: var(--muted);
+    font-size: 12px;
+}
+
 @media (prefers-reduced-motion: reduce) {
-    .progress::-webkit-progress-value {
+    .progress-fill {
         transition: none;
     }
-    .progress:indeterminate {
+    .progress-track.indeterminate .progress-fill {
         animation: none;
-        background-position: center;
+        transform: translateX(90%);
     }
 }
