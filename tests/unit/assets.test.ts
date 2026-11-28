@@ -248,6 +248,54 @@ test('budget recovery retries only useful resources with a larger allowance', as
     );
 });
 
+test('budget recovery reclaims dependencies after a failed retry', async (t) => {
+    const reads: number[] = [];
+    const image = new Uint8Array(10);
+    image.set(png);
+    const large = new Uint8Array(12);
+    large.set(png);
+    const queue = createAssetQueue(
+        async (url, limit) => {
+            reads.push(limit);
+            if (url.endsWith('/broken.png'))
+                return { status: limit < 10 ? 'limit' : 'unavailable' };
+            const data = url.endsWith('/needed.png') ? large : image;
+            return data.length > limit ? { status: 'limit' } : { status: 'downloaded', data };
+        },
+        t.signal,
+        () => 0,
+        { budget: 40, maxResource: 12 },
+    );
+    await queue.add(
+        ['orphan.png', 'dependent.png', 'kept.png', 'broken.png', 'needed.png'],
+        base,
+    );
+    await queue.drain();
+
+    let scans = 0;
+    await queue.recoverBudget((resolve, use) => {
+        scans++;
+        const broken = resolve('broken.png', base, 'image');
+        if (broken) {
+            use(broken);
+            const dependent = resolve('dependent.png', base, 'image');
+            if (dependent) use(dependent);
+        }
+        for (const name of ['kept.png', 'needed.png']) {
+            const path = resolve(name, base, 'image');
+            if (path) use(path);
+        }
+    });
+
+    assert.equal(scans, 2);
+    assert.deepEqual(reads, [12, 12, 10, 5, 5, 10, 10, 12]);
+    assert.deepEqual(
+        queue.result().assets.map((asset) => asset.href),
+        ['images/image_3.png', 'images/image_5.png'],
+    );
+    assert.equal(queue.path('needed.png', base, 'image'), '../images/image_5.png');
+});
+
 for (const settled of [false, true]) {
     test('a later font reference restores a mismatched resource, settled=' + settled, async (t) => {
         const gate = Promise.withResolvers<void>();

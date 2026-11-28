@@ -203,7 +203,6 @@ export function createEbookExport({
             await queue.drain();
             signal.throwIfAborted();
 
-            update({ stage: 'packaging', message: 'Packaging EPUB…' });
             const parser = new DOMParser();
             await queue.recoverBudget(async (resolve, use) => {
                 for (const [index, chapter] of chapters.entries()) {
@@ -222,6 +221,7 @@ export function createEbookExport({
                 }
                 rewriteCss(css, (value, kind) => resolve(value, cssBase, kind), false, use);
             });
+            update({ stage: 'packaging', message: 'Packaging EPUB…' });
             const outputSerializer = serializer ?? new XMLSerializer();
             const documents = chapterIndex(chapters);
             const completed: EpubChapter[] = [];
