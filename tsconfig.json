@@ -1,18 +1,9 @@
 {
+    "extends": "./tsconfig.base.json",
     "compilerOptions": {
-        "target": "ESNext",
-        "module": "ESNext",
-        "moduleResolution": "Bundler",
         "lib": ["ESNext", "DOM", "DOM.Iterable"],
-        "types": ["chrome", "node"],
-        "strict": true,
-        "noEmit": true,
-        "allowImportingTsExtensions": true,
-        "isolatedModules": true,
-        "verbatimModuleSyntax": true,
-        "erasableSyntaxOnly": true,
-        "noUncheckedIndexedAccess": true,
-        "exactOptionalPropertyTypes": true
+        "types": ["chrome"]
     },
-    "include": ["src", "tests", "scripts", "rolldown.config.ts"]
+    "include": ["src"],
+    "exclude": ["src/background.ts"]
 }

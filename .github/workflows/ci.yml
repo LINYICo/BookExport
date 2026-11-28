@@ -20,26 +20,39 @@ jobs:
             - uses: pnpm/action-setup@v6.1.1
               with:
                   version: latest
+            - name: Resolve latest OpenJDK GA major
+              id: java
+              run: |
+                  major=$(curl --fail --silent --show-error --retry 3 https://api.adoptium.net/v3/info/available_releases | jq -er '.available_releases | max')
+                  echo "major=$major" >> "$GITHUB_OUTPUT"
             - uses: actions/setup-java@v6.3.0
               with:
                   distribution: temurin
-                  java-version: '27'
+                  java-version: ${{ steps.java.outputs.major }}
                   check-latest: true
             - name: Update Chrome Stable
               run: |
                   sudo apt-get update
                   sudo apt-get install -y google-chrome-stable
                   google-chrome --version
-            - name: Install EPUBCheck
+            - name: Install latest stable EPUBCheck
+              env:
+                  GH_TOKEN: ${{ github.token }}
               run: |
                   cd "$RUNNER_TEMP"
-                  curl --fail --silent --show-error --location --retry 3 \
-                    https://github.com/w3c/epubcheck/releases/download/v5.4.0/epubcheck-5.4.0.zip -o epubcheck.zip
-                  echo '33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c  epubcheck.zip' | sha256sum --check
+                  release=$(gh api repos/w3c/epubcheck/releases/latest)
+                  version=$(jq -er '.tag_name | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$")) | ltrimstr("v")' <<< "$release")
+                  asset=$(jq -er --arg name "epubcheck-$version.zip" '.assets[] | select(.name == $name)' <<< "$release")
+                  url=$(jq -er '.browser_download_url | select(startswith("https://github.com/w3c/epubcheck/releases/download/"))' <<< "$asset")
+                  digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")' <<< "$asset")
+                  curl --fail --silent --show-error --location --retry 3 "$url" -o epubcheck.zip
+                  actual=$(sha256sum epubcheck.zip)
+                  test "${actual%% *}" = "$digest"
                   unzip -q epubcheck.zip
+                  echo "EPUBCHECK_JAR=$RUNNER_TEMP/epubcheck-$version/epubcheck.jar" >> "$GITHUB_ENV"
                   cat > epubcheck <<'SH'
                   #!/usr/bin/env bash
-                  exec java -jar "$RUNNER_TEMP/epubcheck-5.4.0/epubcheck.jar" "$@"
+                  exec java -jar "$EPUBCHECK_JAR" "$@"
                   SH
                   chmod +x epubcheck
                   echo "$RUNNER_TEMP" >> "$GITHUB_PATH"

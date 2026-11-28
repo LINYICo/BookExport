@@ -1,4 +1,4 @@
-import { escapeXml, makeChapterXhtml } from './document.ts';
+import { chapterFileName, escapeXml, makeChapterXhtml } from './document.ts';
 import { buildZip, type ZipEntry } from './zip.ts';
 
 export interface EpubImage {
@@ -10,10 +10,8 @@ interface EpubChapter {
     title: string;
     source: string;
     assets?: EpubImage[];
-}
-
-function chapterFileName(index: number) {
-    return 'text/chapter_' + String(index).padStart(4, '0') + '.xhtml';
+    properties?: readonly ('svg' | 'mathml')[];
+    embeddedCss?: string;
 }
 
 // Each chapter contains a title, XHTML source, and optional image assets.
@@ -67,7 +65,9 @@ export async function buildEpub({
                 String(i + 1).padStart(4, '0') +
                 '" href="' +
                 chapterFileName(i + 1) +
-                '" media-type="application/xhtml+xml"/>',
+                '" media-type="application/xhtml+xml"' +
+                (ch.properties?.length ? ' properties="' + ch.properties.join(' ') + '"' : '') +
+                '/>',
         )
         .join('\n');
 
@@ -185,7 +185,7 @@ export async function buildEpub({
     chapters.forEach((ch, i) => {
         entries.push({
             name: 'OEBPS/' + chapterFileName(i + 1),
-            data: text(makeChapterXhtml(ch.title, ch.source)),
+            data: text(makeChapterXhtml(ch.title, ch.source, ch.embeddedCss)),
         });
     });
     const archive = await buildZip(entries, now, signal);

@@ -4,6 +4,7 @@ export interface Chapter {
     chapterUid: string | number;
     title?: string;
     wordCount?: number | string;
+    href?: string;
 }
 export interface Book {
     bookId: string;
@@ -45,7 +46,7 @@ export function parseReaderState(state: unknown): Book {
     };
 }
 
-function isChapter(value: unknown): value is Chapter {
+function isChapter(value: unknown): value is Omit<Chapter, 'href'> {
     const item = record(value);
     return (
         !!item.chapterUid &&
@@ -73,7 +74,15 @@ export function normalizeCatalog(payload: unknown, bookId: string): Chapter[] {
         if (String(item.bookId || record(item.book).bookId || '') !== bookId) continue;
         const chapters = item.updated ?? item.chapterInfos ?? item.chapters ?? [];
         if (!Array.isArray(chapters)) throw new Error('Unexpected chapterInfos response format');
-        return chapters.filter(isChapter);
+        return chapters.filter(isChapter).map(({ chapterUid, title, wordCount, ...source }) => {
+            const href = record(source).href;
+            return {
+                chapterUid,
+                ...(title !== undefined ? { title } : {}),
+                ...(wordCount !== undefined ? { wordCount } : {}),
+                ...(typeof href === 'string' ? { href } : {}),
+            };
+        });
     }
     throw new Error('No catalog found for book ID ' + bookId);
 }
@@ -114,7 +123,7 @@ export function createWeReadClient(
     async function request(url: string, body?: object) {
         const deadline = AbortSignal.timeout(requestTimeoutMs);
         const requestSignal = AbortSignal.any([signal, deadline]);
-        const options: RequestInit = { signal: requestSignal };
+        const options: RequestInit = { credentials: 'same-origin', signal: requestSignal };
         if (body) {
             options.method = 'POST';
             options.headers = { 'Content-Type': 'application/json;charset=UTF-8' };

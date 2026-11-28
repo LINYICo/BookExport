@@ -41,6 +41,11 @@ type Event = {
     sessionId?: string;
     params: {
         state?: string;
+        sessionId?: string;
+        targetInfo?: { type: string };
+        url?: string;
+        executionContextId?: number;
+        exceptionDetails?: unknown;
         requestId: string;
         networkId?: string;
         canceled?: boolean;
@@ -117,23 +122,66 @@ async function waitFor(predicate: string, sessionId: string) {
     }
     throw new Error('Timed out: ' + predicate);
 }
-const timeout = setTimeout(() => chrome.kill(), 30000);
+const timeout = setTimeout(() => chrome.kill(), 45000);
 try {
     const { id: extension } = await send<{ id: string }>('Extensions.loadUnpacked', {
         path: resolve('dist/extension'),
     });
     const { targetId: reader } = await send<{ targetId: string }>('Target.createTarget', {
         url: 'about:blank',
+        forTab: true,
     });
-    const { sessionId } = await send<{ sessionId: string }>('Target.attachToTarget', {
+    const { sessionId: tabSession } = await send<{ sessionId: string }>('Target.attachToTarget', {
         targetId: reader,
         flatten: true,
     });
+    const attachedPage = Promise.withResolvers<string>();
+    events.push(({ method, params, sessionId }) => {
+        if (
+            method === 'Target.attachedToTarget' &&
+            sessionId === tabSession &&
+            params.targetInfo?.type === 'page' &&
+            params.sessionId
+        ) {
+            attachedPage.resolve(params.sessionId);
+        }
+    });
+    await send(
+        'Target.setAutoAttach',
+        {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+            filter: [{ type: 'page' }],
+        },
+        tabSession,
+    );
+    const sessionId = await Promise.race([
+        attachedPage.promise,
+        delay(5000, undefined, { ref: false }).then(() => {
+            throw new Error('Chrome did not attach to the reader tab');
+        }),
+    ]);
     await send(
         'Fetch.enable',
         { patterns: [{ urlPattern: 'https://weread.qq.com/*' }] },
         sessionId,
     );
+    const scriptReady = Promise.withResolvers<number>();
+    const unhandled: unknown[] = [];
+    events.push(({ method, params, sessionId: eventSession }) => {
+        if (
+            method === 'Debugger.scriptParsed' &&
+            eventSession === sessionId &&
+            params.url === 'chrome-extension://' + extension + '/content.js' &&
+            params.executionContextId !== undefined
+        ) {
+            scriptReady.resolve(params.executionContextId);
+        }
+        if (method === 'Runtime.exceptionThrown') unhandled.push(params.exceptionDetails);
+    });
+    await send('Runtime.enable', {}, sessionId);
+    await send('Debugger.enable', {}, sessionId);
     const [firstShard, middleShard, lastShard] = EPUB_SHARDS;
     const chapterResponses = new Map([
         ['e_0', firstShard],
@@ -180,8 +228,16 @@ try {
                       {
                           bookId: '42',
                           updated: [
-                              { chapterUid: '1', wordCount: 100 },
-                              { chapterUid: '2', wordCount: 100 },
+                              {
+                                  chapterUid: '1',
+                                  title: '\u7248\u6743\u4fe1\u606f',
+                                  wordCount: 100,
+                                  href: '/book-source/chapter/first.xhtml',
+                              },
+                              {
+                                  chapterUid: '2',
+                                  wordCount: 100,
+                              },
                           ],
                       },
                   ],
@@ -208,6 +264,14 @@ try {
         "document.readyState === 'complete' && document.title.endsWith('\u5fae\u4fe1\u8bfb\u4e66')",
         sessionId,
     );
+    const contextId = await Promise.race([
+        scriptReady.promise,
+        delay(8000, undefined, { ref: false }).then(() => {
+            throw new Error('The BookExport content script did not load');
+        }),
+    ]);
+    await send('Runtime.evaluate', { expression: 'void 0', contextId }, sessionId);
+    await send('Debugger.disable', {}, sessionId);
     let workerTargetId: string | undefined;
     for (let attempt = 0; attempt < 50 && !workerTargetId; attempt++) {
         const { targetInfos } = await send<{
@@ -225,42 +289,48 @@ try {
         targetId: workerTargetId,
         flatten: true,
     });
+    await send('Runtime.enable', {}, worker);
     const mockedImages = await send<Evaluation>(
         'Runtime.evaluate',
         {
             expression: `(() => {
-            globalThis.imageRequests = 0;
-            globalThis.fetch = async (url) => {
-                const found = url.pathname === '/sample.png';
-                if (found) globalThis.imageRequests++;
-                const response = new Response(found ? Uint8Array.fromBase64('${png}') : null, { status: found ? 200 : 404 });
-                Object.defineProperty(response, 'url', { value: url.href });
-                return response;
+            globalThis.images = { held: true, active: 0, peak: 0, aborted: 0, shared: 0 };
+            globalThis.fetch = async (url, { signal }) => {
+                const stats = globalThis.images;
+                const name = url.pathname.split('/').at(-1);
+                stats.active++;
+                stats.peak = Math.max(stats.active, stats.peak);
+                if (name === 'shared.png') stats.shared++;
+                try {
+                    await new Promise((resolve, reject) => {
+                        const timer = stats.held ? undefined : setTimeout(() => {
+                            signal.removeEventListener('abort', cancel);
+                            resolve();
+                        }, 180);
+                        function cancel() {
+                            clearTimeout(timer);
+                            stats.aborted++;
+                            reject(signal.reason);
+                        }
+                        signal.addEventListener('abort', cancel, { once: true });
+                    });
+                    const options = name === 'oversize.png' ? { headers: { 'content-length': '16777217' } } : {};
+                    const response = name === 'missing.png' ? new Response(null, {status: 404})
+                        : new Response(Uint8Array.fromBase64('${png}'), options);
+                    Object.defineProperty(response, 'url', { value: name === 'shared.png'
+                        ? 'https://images.myqcloud.com/shared.png' : url.href });
+                    return response;
+                } finally {
+                    stats.active--;
+                }
             };
         })()`,
         },
         worker,
     );
     assert.equal(mockedImages.exceptionDetails, undefined);
-    async function action() {
-        const { exceptionDetails, result } = await send<Evaluation>(
-            'Runtime.evaluate',
-            {
-                expression: `(async () => {
-                const manifest = chrome.runtime.getManifest();
-                if (manifest.action.default_popup) throw Error('Native popup is still configured');
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (!tab.url.startsWith('https://weread.qq.com/web/reader/')) throw Error('Missing reader tab');
-                await chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_DOWNLOAD_PANEL' }, { frameId: 0 });
-                return true;
-            })()`,
-                returnByValue: true,
-                awaitPromise: true,
-            },
-            worker,
-        );
-        assert.equal(exceptionDetails, undefined, JSON.stringify(exceptionDetails));
-        assert.equal(result.value, true);
+    function action() {
+        return send('Extensions.triggerAction', { id: extension, targetId: reader });
     }
     async function panelNode(selector: string) {
         for (let i = 0; i < 70; i++) {
@@ -360,6 +430,27 @@ try {
 
     holdFirstShard = false;
     await inspectPanel('.download-button', 'function() { this.click(); }');
+    await waitFor('globalThis.images.active === 4', worker);
+    await inspectPanel('.download-button', 'function() { this.click(); }');
+    await matchPanel('#status', "function() { return this.textContent === 'Export cancelled'; }");
+    await waitFor('globalThis.images.aborted === 4 && globalThis.images.active === 0', worker);
+    await send(
+        'Runtime.evaluate',
+        {
+            expression: 'Object.assign(globalThis.images, { held: false, peak: 0, shared: 0 })',
+        },
+        worker,
+    );
+    await inspectPanel(
+        'progress',
+        `function() {
+        new MutationObserver((changes) => {
+            if (changes.some(change => change.attributeName === 'value')
+                && this.hasAttribute('value') && this.value === this.max) this.dataset.completed = 'yes';
+        }).observe(this, { attributes: true });
+    }`,
+    );
+    await inspectPanel('.download-button', 'function() { this.click(); }');
     await matchPanel(
         '.download-button',
         "function() { return this.textContent === 'Cancel download'; }",
@@ -392,22 +483,39 @@ try {
     });
     const imageRequests = await send<Evaluation>(
         'Runtime.evaluate',
-        { expression: 'globalThis.imageRequests', returnByValue: true },
+        {
+            expression: '({ shared: globalThis.images.shared, peak: globalThis.images.peak })',
+            returnByValue: true,
+        },
         worker,
     );
-    assert.equal(imageRequests.result.value, 1, 'Fetch each unique image once');
+    assert.deepEqual(imageRequests.result.value, { shared: 1, peak: 4 });
+    assert.equal(
+        await inspectPanel('progress', 'function() { return this.dataset.completed; }'),
+        'yes',
+    );
     assert.equal(Array.from(chapter.matchAll(/src="\.\.\/images\/image_1\.png"/g)).length, 2);
     assert.ok(chapter.includes('[Illustration: Unavailable &amp; missing]'));
     const nextChapter = execFileSync('unzip', ['-p', file, 'OEBPS/text/chapter_0002.xhtml'], {
         encoding: 'utf8',
     });
     assert.ok(nextChapter.includes('src="../images/image_1.png"'));
+    assert.ok(chapter.includes('<title>\u7248\u6743\u4fe1\u606f</title>'));
     assert.ok(chapter.includes('href="#chapter-start"'));
     assert.doesNotMatch(chapter, /<script/);
-    assert.equal(
-        execFileSync('unzip', ['-p', file, 'OEBPS/styles/weread.css'], { encoding: 'utf8' }),
-        'p { margin: 1em 0; }',
-    );
+    assert.ok(chapter.includes('href="chapter_0002.xhtml#chapter-start"'));
+    assert.match(chapter, /<style>[^<]*embedded[^<]*\.\.\/images\/image_1\.png/);
+    assert.match(chapter, /style="[^"]*\.\.\/images\/image_1\.png/);
+    assert.ok(chapter.includes('[Illustration: Oversized image]'));
+    const opf = execFileSync('unzip', ['-p', file, 'OEBPS/content.opf'], { encoding: 'utf8' });
+    assert.ok(opf.includes('properties="svg mathml"'));
+    const css = execFileSync('unzip', ['-p', file, 'OEBPS/styles/weread.css'], {
+        encoding: 'utf8',
+    });
+    assert.ok(css.includes('margin: 1em 0'));
+    assert.ok(css.includes('../images/image_1.png'));
+    assert.doesNotMatch(css, /example\.invalid/);
+    assert.deepEqual(unhandled, [], 'No unhandled Chrome exceptions');
     console.log('Chrome saved a valid EPUB after cancelling and restarting the download.');
 } finally {
     clearTimeout(timeout);

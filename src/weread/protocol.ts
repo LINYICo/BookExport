@@ -235,7 +235,13 @@ export function decodePayload(encodedPayload: string) {
     if (!encodedPayload) return '';
     const payload = encodedPayload.slice(1);
     const reordered = reverseSwaps(payload, swapPositions(payload));
-    const bytes = Uint8Array.fromBase64(reordered, { alphabet: 'base64url' });
+    // Match the original decoder after reordering, including standard Base64 and separators.
+    const clean = reordered
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/[^A-Za-z0-9_-]/g, '');
+    const normalized = clean.length % 4 === 1 ? clean.slice(0, -1) : clean;
+    const bytes = Uint8Array.fromBase64(normalized, { alphabet: 'base64url' });
     return new TextDecoder('utf-8').decode(bytes);
 }
 

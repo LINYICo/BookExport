@@ -1,5 +1,11 @@
 import { buildEpub, sanitizeFilename, type EpubImage } from './epub/builder.ts';
-import { imageExtensionAndType, localCss, parseChapter } from './epub/document.ts';
+import {
+    chapterLinks,
+    httpsURL,
+    imageExtensionAndType,
+    parseChapter,
+    rewriteCss,
+} from './epub/document.ts';
 import { createWeReadClient, wait } from './weread/client.ts';
 
 type State =
@@ -84,8 +90,18 @@ export function createEbookExport({
                 throw new Error('Missing psvts token. Refresh the reader page and try again.');
             const catalog = await client.catalog(book.bookId);
             if (!catalog.length) throw new Error('No chapters are available to export.');
-            const chapters: { title: string; body: HTMLElement }[] = [];
+            const chapters: (ReturnType<typeof parseChapter> & { title: string })[] = [];
             let css = '';
+            let cssBase = readerUrl;
+            const chapterProgress = () =>
+                update({
+                    stage: 'chapters',
+                    done: chapters.length,
+                    total: catalog.length,
+                    message:
+                        'Downloading chapters (' + chapters.length + ' of ' + catalog.length + ')',
+                });
+            chapterProgress();
             for (const chapter of catalog) {
                 signal.throwIfAborted();
                 const done = chapters.length;
@@ -99,32 +115,70 @@ export function createEbookExport({
                     }
                 }
                 where = chapter.title ? '"' + chapter.title + '": ' : '';
-                update({
-                    stage: 'chapters',
-                    done,
-                    total: catalog.length,
-                    message: 'Downloading chapters (' + done + ' of ' + catalog.length + ')',
-                });
                 const source = await client.chapter(book, chapter);
-                chapters.push({
-                    title: chapter.title || String(chapter.chapterUid),
-                    body: parseChapter(source),
-                });
-                if (!css) css = localCss(await client.css(book, chapter));
-            }
-
-            where = '';
-            update({ stage: 'images', message: 'Finishing image downloads…' });
-            const images = new Map<string, HTMLImageElement[]>();
-            for (const { body } of chapters) {
-                for (const image of body.querySelectorAll('img')) {
-                    const src = image.getAttribute('src') ?? '';
-                    const group = images.get(src);
-                    if (group) group.push(image);
-                    else images.set(src, [image]);
+                const parsed = parseChapter(source, readerUrl, chapter.href);
+                chapters.push({ ...parsed, title: chapter.title || String(chapter.chapterUid) });
+                chapterProgress();
+                if (!css) {
+                    css = await client.css(book, chapter);
+                    cssBase = parsed.base;
                 }
             }
-            const queue = [...images];
+
+            await scheduler.yield();
+            signal.throwIfAborted();
+            chapterLinks(chapters);
+            where = '';
+            update({ stage: 'images', message: 'Finishing image downloads…' });
+            const resourceURLs = new Set<string>();
+            function resourceURL(value: string, base: string) {
+                const url = httpsURL(value, base);
+                if (
+                    !url ||
+                    !(url.hostname === 'weread.qq.com' || url.hostname.endsWith('.weread.qq.com'))
+                )
+                    return;
+                url.hash = '';
+                return url.href;
+            }
+            function collect(value: string, base: string) {
+                const url = resourceURL(value, base);
+                if (url) resourceURLs.add(url);
+                return url;
+            }
+            const imageNodes: { element: Element; url: string | undefined; attribute: string }[] =
+                [];
+            const inlineStyles: {
+                element: Element;
+                base: string;
+                text: string;
+            }[] = [];
+            for (const { body, base, embeddedCss } of chapters) {
+                rewriteCss(embeddedCss, (value) => collect(value, base));
+                for (const image of body.querySelectorAll('img, svg image')) {
+                    const attribute =
+                        image.localName === 'img'
+                            ? 'src'
+                            : image.hasAttribute('href')
+                              ? 'href'
+                              : 'xlink:href';
+                    imageNodes.push({
+                        element: image,
+                        url: collect(image.getAttribute(attribute) ?? '', base),
+                        attribute,
+                    });
+                    if (image.localName === 'image' && attribute === 'href')
+                        image.removeAttribute('xlink:href');
+                }
+                for (const element of body.querySelectorAll('[style]')) {
+                    const text = element.getAttribute('style') ?? '';
+                    inlineStyles.push({ element, base, text });
+                    rewriteCss(text, (value) => collect(value, base), true);
+                }
+            }
+            rewriteCss(css, (value) => collect(value, cssBase));
+            const queue = [...resourceURLs];
+            const paths = new Map<string, string>();
             let cursor = 0;
             let remaining = imageBudget;
             const assets: EpubImage[] = [];
@@ -134,7 +188,7 @@ export function createEbookExport({
                     const index = cursor++;
                     const task = queue[index];
                     if (!task) break;
-                    const [src, elements] = task;
+                    const src = task;
                     let href = '';
                     try {
                         if (src && remaining > 0) {
@@ -145,17 +199,11 @@ export function createEbookExport({
                                 remaining -= data.length;
                                 href = 'images/image_' + (index + 1) + kind.ext;
                                 assets.push({ href, mediaType: kind.mediaType, data });
+                                paths.set(src, '../' + href);
                             }
                         }
                     } catch {
                         signal.throwIfAborted();
-                    }
-                    for (const image of elements) {
-                        if (href) image.setAttribute('src', '../' + href);
-                        else {
-                            const alt = image.getAttribute('alt');
-                            image.replaceWith(alt ? '[Illustration: ' + alt + ']' : '[Image]');
-                        }
                     }
                     if (cursor < queue.length) await wait(imageDelayMs(), signal);
                 }
@@ -165,6 +213,24 @@ export function createEbookExport({
             );
 
             signal.throwIfAborted();
+            for (const { element, url, attribute } of imageNodes) {
+                const href = url && paths.get(url);
+                if (href) element.setAttribute(attribute, href);
+                else {
+                    const alt = element.getAttribute('alt');
+                    if (element.localName === 'img')
+                        element.replaceWith(alt ? '[Illustration: ' + alt + ']' : '[Image]');
+                    else element.remove();
+                }
+            }
+            for (const { element, base, text } of inlineStyles) {
+                element.setAttribute(
+                    'style',
+                    rewriteCss(text, (value) => paths.get(resourceURL(value, base) ?? ''), true),
+                );
+            }
+            css = rewriteCss(css, (value) => paths.get(resourceURL(value, cssBase) ?? ''));
+
             update({ stage: 'packaging', message: 'Packaging EPUB…' });
             const serializer = new XMLSerializer();
             const archive = await buildEpub({
@@ -174,8 +240,12 @@ export function createEbookExport({
                 signal,
                 assets,
                 now: Date.now(),
-                chapters: chapters.map(({ title, body }) => ({
+                chapters: chapters.map(({ title, body, properties, embeddedCss, base }) => ({
                     title,
+                    properties,
+                    embeddedCss: rewriteCss(embeddedCss, (value) =>
+                        paths.get(resourceURL(value, base) ?? ''),
+                    ),
                     source: Array.from(body.childNodes, (node) =>
                         serializer.serializeToString(node),
                     ).join(''),

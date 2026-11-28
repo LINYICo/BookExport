@@ -1,0 +1,9 @@
+{
+    "extends": "./tsconfig.base.json",
+    "compilerOptions": {
+        "lib": ["ESNext", "WebWorker", "WebWorker.Iterable"],
+        "skipLibCheck": true,
+        "types": ["chrome"]
+    },
+    "include": ["src/background.ts"]
+}

@@ -34,7 +34,7 @@ pnpm check
 pnpm release
 ```
 
-Load `dist/extension/` to test the build. The Chrome test uses a temporary profile and synthetic reader responses, then validates the downloaded file with EPUBCheck. Set `CHROME_BIN` or `EPUBCHECK_BIN` to override their executable paths. Use [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) in an isolated stable Chrome profile for interactive debugging.
+Load `dist/extension/` to test the build. Watch mode rebuilds source and copies changes to the manifest and icons. Unit and Chrome tests validate the EPUB files they produce with EPUBCheck. The Chrome test uses a temporary profile and synthetic reader responses. Set `CHROME_BIN` or `EPUBCHECK_BIN` to override their executable paths. Use [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) in an isolated stable Chrome profile for interactive debugging.
 
 Run `pnpm check` before publishing. Run `pnpm release` to create the installable ZIP under `dist/`. Update the package and manifest versions together and record changes in [RELEASE.md](RELEASE.md).
 

@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -175,6 +179,13 @@ test('decodePayload decodes the base64url reference payload with UTF-8 text', ()
     assert.equal(decodePayload(GOLDEN_PAYLOAD), GOLDEN_DECODED);
 });
 
+test('decodePayload accepts the original Base64 alphabets and ignores payload separators', () => {
+    assert.equal(decodePayload('ZVsSGbG8?'), 'Hello');
+    assert.equal(decodePayload('ZC/4K'), '\u083f');
+    assert.equal(decodePayload('ZC_4K'), '\u083f');
+    assert.equal(decodePayload('ZA'), '');
+});
+
 test('decodeContentShards joins three shards before decoding', () => {
     assert.equal(
         decodeContentShards(GOLDEN_SHARDS[0], GOLDEN_SHARDS[1], GOLDEN_SHARDS[2]),
@@ -342,8 +353,19 @@ function readZipEntries(archive: Uint8Array<ArrayBuffer>) {
     return entries;
 }
 
+async function validatedEpub(options: Parameters<typeof buildEpub>[0]) {
+    const archive = await buildEpub(options);
+    await using temp = await mkdtempDisposable(join(tmpdir(), 'bookexport-unit-'));
+    const file = join(temp.path, 'fixture.epub');
+    await writeFile(file, new Uint8Array(await archive.arrayBuffer()));
+    execFileSync(process.env.EPUBCHECK_BIN || 'epubcheck', ['--failonwarnings', file], {
+        timeout: 20000,
+    });
+    return archive;
+}
+
 test('buildEpub produces an EPUB readable as a standard ZIP archive', async () => {
-    const archive = await buildEpub({
+    const archive = await validatedEpub({
         title: 'Test Book',
         author: 'Test Author',
         chapters: [
@@ -401,12 +423,12 @@ test('buildEpub produces an EPUB readable as a standard ZIP archive', async () =
 });
 
 test('buildEpub supplies a fallback stylesheet', async () => {
-    const archive = await buildEpub({
+    const archive = await validatedEpub({
         title: 'Book',
         author: '',
         chapters: [{ title: 'Chapter', source: '<p>x</p>' }],
         css: '',
-        now: 0,
+        now: 1756500000000,
     });
     const entries = readZipEntries(new Uint8Array(await archive.arrayBuffer()));
     assert.ok(entries.get('OEBPS/styles/weread.css')?.text().includes('line-height'));
@@ -414,12 +436,12 @@ test('buildEpub supplies a fallback stylesheet', async () => {
 
 test('buildEpub omits the creator when the author is missing or blank', async () => {
     for (const author of [undefined, '', '  ']) {
-        const archive = await buildEpub({
+        const archive = await validatedEpub({
             title: 'Book',
             author,
             chapters: [{ title: 'Chapter', source: '<p>x</p>' }],
             css: '',
-            now: 0,
+            now: 1756500000000,
         });
         const opf = readZipEntries(new Uint8Array(await archive.arrayBuffer()))
             .get('OEBPS/content.opf')
@@ -430,24 +452,24 @@ test('buildEpub omits the creator when the author is missing or blank', async ()
 });
 
 test('buildEpub stores images without compression and lists them in the manifest', async () => {
-    const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9]);
-    const archive = await buildEpub({
+    const png = await readFile('public/icons/icon48.png');
+    const archive = await validatedEpub({
         title: 'Book',
         author: '',
-        now: 0,
+        now: 1756500000000,
         chapters: [
             {
                 title: 'Chapter',
-                source: '<p>x</p><div class="bodyPic"><img src="../images/pic.jpg"/></div>',
-                assets: [{ href: 'images/pic.jpg', mediaType: 'image/jpeg', data: jpg }],
+                source: '<p>x</p><div class="bodyPic"><img src="../images/pic.png" alt="Sample"/></div>',
+                assets: [{ href: 'images/pic.png', mediaType: 'image/png', data: png }],
             },
         ],
         css: '',
     });
     const entries = readZipEntries(new Uint8Array(await archive.arrayBuffer()));
-    assert.ok([...entries.keys()].includes('OEBPS/images/pic.jpg'), 'the image entry exists');
+    assert.ok([...entries.keys()].includes('OEBPS/images/pic.png'), 'the image entry exists');
     assert.equal(
-        entries.get('OEBPS/images/pic.jpg')?.method,
+        entries.get('OEBPS/images/pic.png')?.method,
         0,
         'the image is stored without recompression',
     );
@@ -455,11 +477,11 @@ test('buildEpub stores images without compression and lists them in the manifest
         entries
             .get('OEBPS/content.opf')
             ?.text()
-            .includes('href="images/pic.jpg" media-type="image/jpeg"'),
+            .includes('href="images/pic.png" media-type="image/png"'),
         'the manifest lists the asset',
     );
     assert.ok(
-        entries.get('OEBPS/text/chapter_0001.xhtml')?.text().includes('src="../images/pic.jpg"'),
+        entries.get('OEBPS/text/chapter_0001.xhtml')?.text().includes('src="../images/pic.png"'),
     );
 });
 
@@ -499,11 +521,21 @@ test('createEbookExport reads the page source before requesting the catalog', as
             },
         ],
     });
-    const calls: { url: string; method: string; body: BodyInit | null | undefined }[] = [];
+    const calls: {
+        url: string;
+        method: string;
+        body: BodyInit | null | undefined;
+        credentials: RequestCredentials | undefined;
+    }[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (url, init = {}) => {
         const u = String(url);
-        calls.push({ url: u, method: init.method || 'GET', body: init.body });
+        calls.push({
+            url: u,
+            method: init.method || 'GET',
+            body: init.body,
+            credentials: init.credentials,
+        });
         if (init.method === 'POST' && u.includes('chapterInfos')) {
             return new Response(catalog);
         }
@@ -530,9 +562,11 @@ test('createEbookExport reads the page source before requesting the catalog', as
                 url: 'https://weread.qq.com/web/reader/abc',
                 method: 'GET',
                 body: undefined,
+                credentials: 'same-origin',
             },
             'the first request retrieves the page source',
         );
+        assert.ok(calls.every((call) => call.credentials === 'same-origin'));
         assert.equal(
             JSON.parse(String(calls[1]?.body)).bookIds[0],
             '43208843',
